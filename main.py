@@ -217,6 +217,8 @@ SYSTEMS = {
     "psp": "psp", "playstation-portable": "psp",
     "3ds": "n3ds", "n3ds": "n3ds", "nintendo-3ds": "n3ds", "new-nintendo-3ds": "n3ds",
 }
+LIBRARY_PAGE = 250  # games asked for at a time when listing RomM's library
+LIBRARY_PAGES = 40
 CHUNK = 1024 * 1024
 STALL = 60  # seconds without a byte before a download gives up
 SPARE = 64 * 1024 * 1024  # room left on the disk after a download
@@ -886,6 +888,40 @@ class Plugin:
         detail = _detail(rom)
         _keep("games", rom_id, detail)
         return {"ok": True, **detail}
+
+    async def romm_library(self):
+        """Every game RomM has, to make each an entry in Steam: {"ok": True, "games": [{"rom_id",
+        "name", "platform", "system" ("" when its folder in RetroDECK is not known yet), "size"}]}.
+        Of a game kept in several versions only the main one is listed."""
+        server, key = _games_key()
+        if not server:
+            return {"ok": False, "why": key}
+        loop = asyncio.get_running_loop()
+        games, offset = [], 0
+        for _ in range(LIBRARY_PAGES):
+            path = ("/api/roms?limit=%d&offset=%d&order_by=name&order_dir=asc&with_char_index=false"
+                    "&with_filter_values=false&with_rom_id_index=false&with_total=false" % (LIBRARY_PAGE, offset))
+            status, reply = await loop.run_in_executor(None, _request, server, "GET", path, key["token"])
+            if status == 401:
+                _forget_key()
+            if status in (401, 403):
+                return {"ok": False, "why": "refused"}
+            items = reply.get("items") if isinstance(reply, dict) else None
+            if status != 200 or not isinstance(items, list):
+                return {"ok": False, "why": "unreachable"}
+            for rom in items:
+                if not isinstance(rom, dict) or _number(rom.get("id")) <= 0:
+                    continue
+                mine = rom.get("rom_user") if isinstance(rom.get("rom_user"), dict) else {}
+                if rom.get("sibling_roms") and mine.get("is_main_sibling") is False:
+                    continue
+                d = _detail(rom)
+                games.append({"rom_id": d["rom_id"], "name": d["name"][:120], "platform": d["platform"][:60],
+                              "system": d["system"], "size": d["size"]})
+            if len(items) < LIBRARY_PAGE:
+                break
+            offset += LIBRARY_PAGE
+        return {"ok": True, "games": games}
 
     async def game_list(self):
         """The Steam games Vistazo looks after: {Steam number: RomM number}."""

@@ -1,7 +1,7 @@
 import { ButtonItem, ConfirmModal, PanelSection, PanelSectionRow, TextField, ToggleField, showModal } from "@decky/ui";
 import { useCallback, useEffect, useState } from "react";
 import { t } from "./i18n";
-import { GameState, addOwn, clearLostOwn, gameState, loadOwned, lostOwn, onOwnChange, ownedApp, ownedRom, removeOwn, retryOwn } from "./own";
+import { GameState, addOwn, clearLostOwn, dropNotInstalled, gameState, loadOwned, lostOwn, onOwnChange, ownedApp, ownedRom, removeOwn, retryOwn, syncLibrary } from "./own";
 import { openGame } from "./page";
 import { PairAnswer, RommHealth, checkRomm, pairRomm, unlinkRomm, useRomm } from "./romm";
 import { setOwnGames, useOwnGames } from "./settings";
@@ -19,6 +19,7 @@ export function Settings() {
         <ToggleField label={t.ownGamesLabel} description={t.ownGamesDesc} checked={games} onChange={setOwnGames} />
       </PanelSectionRow>
       <RommRow games={games} />
+      {games && <LibraryRow />}
       {games && <OwnRow />}
       {games && <LostRow />}
     </PanelSection>
@@ -26,6 +27,47 @@ export function Settings() {
 }
 
 const useOwnChanges = (fn: () => void) => useEffect(() => onOwnChange(fn), [fn]);
+
+declare const DeckyPluginLoader: any;
+// RomM's whole library as entries in Steam, in one collection per console; each game is then
+// installed from its own page. One row: bring it (again later, for what is new), and a way to
+// take away the entries of games that are not installed.
+function LibraryRow() {
+  const status = useRomm();
+  const [busy, setBusy] = useState(false);
+  const [said, setSaid] = useState<string | null>(null);
+  if (status !== "linked") return null;
+  // Tender has its own entries of the same games: bringing them all would show each one twice.
+  const tender = !!(DeckyPluginLoader?.plugins ?? []).some((p: any) => p?.name === "Tender");
+  const run = (what: () => Promise<string | null>, done: string) => {
+    setBusy(true);
+    setSaid(null);
+    what().then((why) => {
+      setSaid(why ? t.ownWhy(why) : done);
+      setBusy(false);
+    });
+  };
+  return (
+    <>
+      <PanelSectionRow>
+        <ButtonItem
+          layout="below"
+          label={t.libraryLabel}
+          description={said ?? (tender ? t.libraryTender : t.libraryDesc)}
+          disabled={busy}
+          onClick={() => run(() => syncLibrary((n, of) => setSaid(t.libraryStep(n, of))), t.libraryDone)}
+        >
+          {t.libraryBring}
+        </ButtonItem>
+      </PanelSectionRow>
+      <PanelSectionRow>
+        <ButtonItem layout="below" disabled={busy} onClick={() => run(dropNotInstalled, t.libraryDropped)}>
+          {t.libraryDrop}
+        </ButtonItem>
+      </PanelSectionRow>
+    </>
+  );
+}
 
 // Vistazo's own RomM key, to see a retro game's achievements as soon as it closes and, with
 // `games`, to look after the games themselves. One row: what state it is in and the one thing to

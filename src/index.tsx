@@ -1,9 +1,9 @@
 import { definePlugin } from "@decky/api";
 import { PanelSection, PanelSectionRow } from "@decky/ui";
 import { useEffect, useState } from "react";
-import { Addon, AddonFile, AddonGame, AddonProgress, CONTRACT, VistazoApi } from "./contract";
+import { Addon, AddonAction, AddonFile, AddonGame, AddonProgress, CONTRACT, VistazoApi } from "./contract";
 import { t } from "./i18n";
-import { cancelOwn, gameState, loadOwned, ownedApps, ownedRom, refreshArt, retryOwn } from "./own";
+import { cancelOwn, gameState, loadOwned, ownedApps, ownedRom, refreshArt, retryOwn, uninstallOwn } from "./own";
 import { isLinked, rommGame, rommProgress, rommStatus } from "./romm";
 import { safe } from "./safe";
 import { Settings } from "./Rows";
@@ -71,6 +71,14 @@ async function progress(raId: number, refresh: boolean): Promise<AddonProgress |
   return p;
 }
 
+// On one of its own games' pages: taking the file off the Deck, when the add-on brought it.
+async function actions(appid: number): Promise<AddonAction[]> {
+  if (!ownGames() || !ownedRom(appid)) return [];
+  const s = await gameState(appid).catch(() => null);
+  if (!s?.installed || !s.removable) return [];
+  return [{ id: "uninstall", label: t.uninstall, run: async () => void (await uninstallOwn(appid)) }];
+}
+
 const addon: Addon = {
   id: "romm",
   name: "RomM",
@@ -82,6 +90,7 @@ const addon: Addon = {
   fetchFile: async (appid) => void (await retryOwn(appid)),
   cancelFile: async (appid) => void (await cancelOwn(appid)),
   shelf: () => (ownGames() ? ownedApps() : []),
+  actions,
   progress,
   Settings,
 };

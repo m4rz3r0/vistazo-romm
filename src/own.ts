@@ -146,7 +146,7 @@ async function dress(appid: number, romId: number, from: number) {
 // Makes the add-on's own entry for a RomM game and starts bringing its file. `from` is the Steam
 // entry it was asked from (Tender's). Returns why it could not, or null when it is under way.
 // Nothing is left in Steam when it fails.
-export async function addOwn(romId: number, name: string, from = 0): Promise<string | null> {
+export async function addOwn(romId: number, name: string, from = 0, fetchFile = true): Promise<string | null> {
   await loadOwned();
   if (ownedApp(romId)) return null;
   const l = await launcher();
@@ -168,7 +168,7 @@ export async function addOwn(romId: number, name: string, from = 0): Promise<str
   owned.set(appid, romId);
   changed();
   dress(appid, romId, from).catch((e) => console.warn("[Vistazo RomM] pictures", e));
-  if (!taken.installed) await download(appid).catch(() => null);
+  if (fetchFile && !taken.installed) await download(appid).catch(() => null);
   return null;
 }
 
@@ -222,6 +222,79 @@ async function mend() {
   }
 }
 let mendTries = 0;
+
+// RomM's whole library as entries in Steam, the way Steam's own games sit there: each game an
+// entry (its file is brought when the player asks for it on its page), gathered in one Steam
+// collection per console. Run again, it adds what is new in RomM and leaves the rest as it is.
+declare const collectionStore: any;
+const library = callable<[], Reply & { games: { rom_id: number; name: string; platform: string; system: string; size: number }[] }>("romm_library");
+const COLLECTION = "RomM: "; // a collection's name: "RomM: Nintendo DS"
+
+async function gather(byPlatform: Map<string, number[]>) {
+  if (typeof collectionStore === "undefined") return;
+  for (const [platform, appids] of byPlatform) {
+    const overviews = appids.map((id) => safe(() => appStore.GetAppOverviewByAppID(id), null)).filter(Boolean);
+    if (!overviews.length) continue;
+    const name = COLLECTION + platform;
+    const existing = (collectionStore.userCollections as any[]).find((c) => String(c.displayName).toLowerCase() === name.toLowerCase());
+    const collection = existing ?? collectionStore.NewUnsavedCollection(name, undefined, []);
+    const have = new Set<number>((collection.allApps ?? []).map((o: any) => Number(o.appid)));
+    const missing = overviews.filter((o: any) => !have.has(Number(o.appid)));
+    if (!existing || missing.length) {
+      collection.AsDragDropCollection().AddApps(missing);
+      await collection.Save();
+    }
+  }
+}
+
+let syncing = false;
+export async function syncLibrary(step: (done: number, total: number) => void): Promise<string | null> {
+  if (syncing) return "busy";
+  syncing = true;
+  try {
+    const lib = await library().catch(() => null);
+    if (!lib?.ok) return lib?.why ?? "error";
+    await loadOwned(true);
+    // Only consoles whose folder in RetroDECK is known: an entry that could never start helps nobody.
+    const games = lib.games.filter((g) => g.system);
+    let done = 0;
+    let why: string | null = null;
+    for (const g of games) {
+      if (!ownedApp(g.rom_id)) why = (await addOwn(g.rom_id, g.name, 0, false)) ?? why;
+      step(++done, games.length);
+    }
+    const byPlatform = new Map<string, number[]>();
+    for (const g of games) {
+      const appid = ownedApp(g.rom_id);
+      if (appid && g.platform) byPlatform.set(g.platform, [...(byPlatform.get(g.platform) ?? []), appid]);
+    }
+    await gather(byPlatform).catch((e) => console.warn("[Vistazo RomM] collections", e));
+    changed();
+    return why;
+  } finally {
+    syncing = false;
+  }
+}
+
+// Takes away the entries whose game is not on the Deck (nothing is deleted from the disk): what
+// stays is what the player has installed.
+export async function dropNotInstalled(): Promise<string | null> {
+  let why: string | null = null;
+  for (const appid of ownedApps()) {
+    const state = await gameState(appid).catch(() => null);
+    if (!state || state.installed || state.job?.state === "downloading") continue;
+    why = (await removeOwn(appid)) ?? why;
+  }
+  return why;
+}
+
+// Takes one game's file off the Deck, keeping its entry: as uninstalling a Steam game does.
+export async function uninstallOwn(appid: number): Promise<string | null> {
+  if (isRunning(appid)) return "running";
+  const gone = await remove(appid).catch(() => null);
+  changed();
+  return gone?.ok ? null : gone?.why ?? "error";
+}
 
 export const retryOwn = (appid: number) => download(appid).catch(() => null);
 export const cancelOwn = (appid: number) => cancel(appid).catch(() => null);

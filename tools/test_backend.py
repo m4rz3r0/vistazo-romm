@@ -59,6 +59,7 @@ class RomM:
         self.redirect_to = None
         self.refuse = set()  # rom ids answered with 401
         self.covers = {}  # file name -> bytes
+        self.searches = []  # what the games list was asked for
 
 
 romm = RomM()
@@ -125,6 +126,13 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(raw)
             return
+        if parts == ["api", "roms"]:
+            from urllib.parse import parse_qs, urlsplit
+            q = parse_qs(urlsplit(self.path).query)
+            romm.searches.append(q)
+            every = [romm.roms[k] for k in sorted(romm.roms)]
+            start, size = int(q.get("offset", ["0"])[0]), int(q.get("limit", ["50"])[0])
+            return self.reply(200, {"items": every[start:start + size], "total": None})
         if parts[:2] == ["api", "roms"] and len(parts) == 3:
             rom_id = int(parts[2])
             if romm.redirect_to:
@@ -291,6 +299,24 @@ def test_detail():
     check("nothing else leaves the backend", "user_saves" in got or "files" in got, False)
     check("unknown game", run(plugin.romm_game(404)), {"ok": False, "why": "game"})
     check("not a number", run(plugin.romm_game("x")), {"ok": False, "why": "game"})
+
+    # The whole library, page by page, with only what a list needs; of several versions, the main one.
+    before = dict(romm.roms)
+    main.LIBRARY_PAGE = 2
+    romm.roms[30] = rom(30, "A.nds")
+    romm.roms[31] = rom(31, "B.iso", slug="ngc")
+    romm.roms[32] = rom(32, "C.nds", sibling_roms=[{"id": 30}], rom_user={"is_main_sibling": False})
+    romm.roms[33] = rom(33, "D.nds", sibling_roms=[{"id": 30}], rom_user={"is_main_sibling": True})
+    got = run(plugin.romm_library())
+    ids = [g["rom_id"] for g in got["games"]]
+    check("library ok", (got["ok"], 32 in ids, {30, 31, 33} <= set(ids)), (True, False, True))
+    check("library row", next(g for g in got["games"] if g["rom_id"] == 30), {"rom_id": 30, "name": "Game 30", "platform": "Nintendo DS", "system": "nds", "size": 300000})
+    check("unknown system says so", next(g for g in got["games"] if g["rom_id"] == 31)["system"], "")
+    check("asked in pages", [q["offset"][0] for q in romm.searches[-((len(romm.roms) + 2) // 2):]][:2], ["0", "2"])
+    check("asked small", romm.searches[-1]["with_filter_values"], ["false"])
+    main.LIBRARY_PAGE = 250
+    romm.roms.clear()
+    romm.roms.update(before)
 
     # A redirect is never followed: the key reaches no other address.
     romm.redirect_to = OTHER
