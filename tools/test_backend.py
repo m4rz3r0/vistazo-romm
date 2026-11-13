@@ -657,6 +657,13 @@ def test_move_in():
     check("the leftover is removed", os.listdir(old), [])
     os.remove(main.KEY_FILE)
     os.remove(main.GAMES_FILE)
+    # And what it left in Vistazo's data folder goes when asked, and nothing else there.
+    data = os.path.join(decky.DECKY_HOME, "data", "Vistazo")
+    os.makedirs(data)
+    for name in ("vistazo-launch", "launch.json", "romm-kept.json", "something-of-vistazo"):
+        open(os.path.join(data, name), "w").close()
+    check("tidied", run(plugin.game_tidy()), {"ok": True})
+    check("only its own leftovers", os.listdir(data), ["something-of-vistazo"])
 
 
 try:

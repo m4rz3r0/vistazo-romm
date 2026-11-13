@@ -904,6 +904,20 @@ class Plugin:
             return {"ok": False, "why": "cover"}
         return {"ok": True, "data": base64.b64encode(cover[0]).decode("ascii"), "kind": cover[1]}
 
+    async def game_tidy(self):
+        """Clears what this code left in Vistazo's own data folder when it lived there (its
+        launcher, the launcher's list, RomM's last answers). Asked for once the entries in Steam
+        point at the launcher here."""
+        old = os.path.join(decky.DECKY_HOME, "data", "Vistazo")
+        for name in ("vistazo-launch", "launch.json", "romm-kept.json"):
+            path = os.path.join(old, name)
+            try:
+                if os.path.isfile(path) and not os.path.islink(path):
+                    os.remove(path)
+            except OSError as e:
+                decky.logger.warning("Not cleared at Vistazo's: %s", e)
+        return {"ok": True}
+
     async def game_state(self, appid):
         """Whether Vistazo looks after this Steam game, has its file, and how a download goes."""
         appid = _number(appid)

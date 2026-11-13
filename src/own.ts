@@ -32,6 +32,7 @@ const download = callable<[appid: number], GameState>("game_download");
 const cancel = callable<[appid: number], GameState>("game_cancel");
 const remove = callable<[appid: number], GameState>("game_remove");
 export const gameState = callable<[appid: number], GameState>("game_state");
+const tidy = callable<[], Reply>("game_tidy");
 
 // Steam number -> RomM number of the games that are the add-on's. The backend's record is the truth;
 // this copy is read from it and told about every change, so whatever shows a game follows it.
@@ -200,7 +201,7 @@ export async function clearLostOwn(): Promise<string | null> {
 // at where it is now. Setting the same values again changes nothing.
 let mended = false;
 async function mend() {
-  if (mended || !owned.size) return;
+  if (mended) return;
   mended = true;
   const l = await launcher().catch(() => null);
   if (!l?.ok) return;
@@ -209,6 +210,8 @@ async function mend() {
     safe(() => SteamClient.Apps.SetShortcutExe(appid, l.exe), undefined);
     safe(() => SteamClient.Apps.SetShortcutStartDir(appid, l.start_dir), undefined);
   }
+  // Nothing starts through the old launcher any more: what was left beside it can go.
+  tidy().catch(() => undefined);
 }
 
 export const retryOwn = (appid: number) => download(appid).catch(() => null);
