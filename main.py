@@ -878,7 +878,8 @@ def _romm_save(server, key, rom_id, kind, stem):
     mine = [
         x for x in saves
         if isinstance(x, dict) and _number(x.get("id")) > 0 and _number(x.get("rom_id")) == rom_id
-        and _text(x.get("emulator")) == kind[0] and _text(x.get("slot")) == SAVE_SLOT
+        # Older uploads carry no emulator at all: the slot and the extension still tell them apart.
+        and _text(x.get("emulator")) in (kind[0], "") and _text(x.get("slot")) == SAVE_SLOT
         and "." + _text(x.get("file_extension")).lstrip(".").lower() == kind[1]
         and not x.get("missing_from_fs")
     ]
