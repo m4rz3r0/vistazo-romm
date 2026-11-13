@@ -247,6 +247,16 @@ async function gather(byPlatform: Map<string, number[]>) {
   }
 }
 
+// A collection of the add-on's left without games goes too (never one of another program's:
+// Tender's carry the device's name in brackets).
+async function tidyCollections() {
+  if (typeof collectionStore === "undefined") return;
+  for (const c of [...(collectionStore.userCollections as any[])]) {
+    const name = String(c.displayName ?? "");
+    if (name.startsWith(COLLECTION) && !name.includes("(") && !(c.allApps ?? []).length) await c.Delete();
+  }
+}
+
 let syncing = false;
 export async function syncLibrary(step: (done: number, total: number) => void): Promise<string | null> {
   if (syncing) return "busy";
@@ -285,6 +295,9 @@ export async function dropNotInstalled(): Promise<string | null> {
     if (!state || state.installed || state.job?.state === "downloading") continue;
     why = (await removeOwn(appid)) ?? why;
   }
+  // Steam takes a moment to drop the entries from their collections.
+  await wait(1500);
+  await tidyCollections().catch((e) => console.warn("[Vistazo RomM] collections", e));
   return why;
 }
 

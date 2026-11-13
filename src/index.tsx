@@ -7,6 +7,7 @@ import { cancelOwn, gameState, loadOwned, ownedApps, ownedRom, refreshArt, retry
 import { isLinked, rommGame, rommProgress, rommStatus } from "./romm";
 import { safe } from "./safe";
 import { Settings } from "./Rows";
+import { tuckAway } from "./tuck";
 import { ownGames } from "./settings";
 
 // Vistazo RomM hands Vistazo what it knows of RomM games; Vistazo draws it. Without Vistazo
@@ -152,6 +153,7 @@ export default definePlugin(() => {
   loadOwned();
   rommStatus();
   const disconnect = connect();
+  const untuck = tuckAway("Vistazo RomM", "vistazo-romm");
   return {
     name: "Vistazo RomM",
     titleView: <div>Vistazo RomM</div>,
@@ -159,6 +161,7 @@ export default definePlugin(() => {
     icon: <Icon />,
     onDismount() {
       disconnect();
+      untuck();
     },
   };
 });
