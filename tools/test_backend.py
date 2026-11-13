@@ -64,6 +64,7 @@ class RomM:
         self.uploads = []  # (query, file name) of each save sent
         self.short_save = False  # send less of a save than announced
         self.firmware = []  # RomM's BIOS files: dicts with "data"
+        self.meanwhile = None  # called while a save is on its way
 
 
 romm = RomM()
@@ -171,6 +172,8 @@ class Handler(BaseHTTPRequestHandler):
             save = next((s for s in romm.saves if s["id"] == int(parts[2])), None)
             if not save:
                 return self.reply(404)
+            if romm.meanwhile:
+                romm.meanwhile()
             data = save["data"][:-3] if romm.short_save else save["data"]
             self.send_response(200)
             self.send_header("Content-Length", str(len(data)))
@@ -986,11 +989,66 @@ def test_saves():
     write(real)
     check("back in step", sync()["state"], "synced")
 
+    # RomM files a save under a name of its own (tags, dates): it is this game's all the same.
+    add_save(5, b"under RomM's own name", "Game (Spain) [2026-11-13 10-00-00].srm")
+    check("another name, same game", (sync()["state"], read()), ("brought", b"under RomM's own name"))
+
+    # A save here older than every copy (brought from elsewhere with its old date): its copy is
+    # the one just made and stays, whatever its date.
+    write(b"an old save put here by hand")
+    os.utime(save, (946684800, 946684800))
+    add_save(5, b"newer in RomM", "Game.srm")
+    check("both differ", sync()["state"], "conflict")
+    check("RomM's taken", (sync("romm")["state"], read()), ("brought", b"newer in RomM"))
+    check("the old save is among the copies", b"an old save put here by hand" in [read(os.path.join(copies, n)) for n in kept_copies()], True)
+    check("still only a few copies", len(kept_copies()), main.SAVE_COPIES)
+
+    # The save here changes while RomM's is on its way (the game was started): nothing is replaced.
+    add_save(5, b"another newer one", "Game.srm")
+    romm.meanwhile = lambda: write(b"written by the game meanwhile")
+    check("changed meanwhile", (sync()["state"], read()), ("busy", b"written by the game meanwhile"))
+    romm.meanwhile = None
+    check("then it is a conflict, untouched", (sync()["state"], read()), ("conflict", b"written by the game meanwhile"))
+    check("settled", sync("deck")["state"], "sent")
+
+    # A try that fails costs no copy: the ones kept stay as they were.
+    before = kept_copies()
+    add_save(5, b"will not arrive", "Game.srm")
+    romm.short_save = True
+    for _ in range(3):
+        check("failed try", sync()["state"], "unreachable")
+    check("copies as they were", kept_copies(), before)
+    romm.short_save = False
+    romm.saves.pop()
+
+    # A save RomM says nothing checkable about (no size, no sum) is not taken; one whose bytes
+    # do not match its sum neither.
+    add_save(5, b"unchecked", "Game.srm", file_size_bytes=0, content_hash="")
+    mine = read()
+    check("nothing to check it against", (sync()["state"], read()), ("unreachable", mine))
+    romm.saves.pop()
+    add_save(5, b"right size, other bytes", "Game.srm", content_hash="0" * 32)
+    check("sum does not match", (sync()["state"], read()), ("unreachable", mine))
+    romm.saves.pop()
+
+    # The copies folder as a link to somewhere else: no copy goes there, and nothing is replaced.
+    elsewhere = os.path.join(TMP, "elsewhere")
+    os.makedirs(elsewhere)
+    write(b"not this game's", os.path.join(elsewhere, "Game_20200101_000000.srm"))
+    kept_aside = os.path.join(TMP, "copies-aside")
+    os.rename(copies, kept_aside)
+    os.symlink(elsewhere, copies)
+    add_save(5, b"newer again", "Game.srm")
+    check("linked copies folder", (sync()["state"], read(), sorted(os.listdir(elsewhere))), ("disk", mine, ["Game_20200101_000000.srm"]))
+    os.remove(copies)
+    os.rename(kept_aside, copies)
+    romm.saves.pop()
+    check("in step again", sync()["state"], "synced")
+
     # Saves of another emulator, another slot, another game or gone from RomM's disk are not this game's.
     newest = read()
     add_save(5, b"other emulator", "Game.srm", emulator="retroarch-desmume")
     add_save(5, b"other slot", "Game.srm", slot="manual")
-    add_save(5, b"other name", "Another.srm")
     add_save(5, b"gone", "Game.srm", missing_from_fs=True)
     add_save(6, b"other game", "Game.srm")
     check("not mine", (sync()["state"], read()), ("synced", newest))

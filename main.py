@@ -6,6 +6,7 @@ import asyncio
 import base64
 import datetime
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -879,7 +880,6 @@ def _romm_save(server, key, rom_id, kind, stem):
         if isinstance(x, dict) and _number(x.get("id")) > 0 and _number(x.get("rom_id")) == rom_id
         and _text(x.get("emulator")) == kind[0] and _text(x.get("slot")) == SAVE_SLOT
         and "." + _text(x.get("file_extension")).lstrip(".").lower() == kind[1]
-        and _text(x.get("file_name_no_tags")).lower() in ((stem + kind[1]).lower(), stem.lower())
         and not x.get("missing_from_fs")
     ]
     mine.sort(key=lambda x: (_when(x.get("updated_at")), _number(x.get("id"))), reverse=True)
@@ -888,26 +888,35 @@ def _romm_save(server, key, rom_id, kind, stem):
 
 def _copy_aside(path):
     """A copy of a save about to be replaced, in a folder beside it; the oldest copies beyond a
-    few go. Raises OSError when the copy could not be made: then nothing may be replaced."""
+    few go, never the one just made. Raises OSError when the copy could not be made: then
+    nothing may be replaced."""
     folder = os.path.join(os.path.dirname(path), SAVE_COPIES_DIR)
+    if os.path.islink(folder):
+        raise OSError("the copies folder is a link")  # copies must stay beside the save
     os.makedirs(folder, exist_ok=True)
     stem, ext = os.path.splitext(os.path.basename(path))
-    copy = os.path.join(folder, "%s_%s%s" % (stem, time.strftime("%Y%m%d_%H%M%S"), ext))
-    n = 1
+    # Named by when it is made, to the millionth of a second: a later copy always sorts later.
+    now = time.time()
+    stamp, n = time.strftime("%Y%m%d_%H%M%S", time.localtime(now)), int(now % 1 * 1000000)
+    copy = os.path.join(folder, "%s_%s_%06d%s" % (stem, stamp, n, ext))
     while os.path.lexists(copy):
         n += 1
-        copy = os.path.join(folder, "%s_%s_%d%s" % (stem, time.strftime("%Y%m%d_%H%M%S"), n, ext))
+        copy = os.path.join(folder, "%s_%s_%06d%s" % (stem, stamp, n, ext))
     shutil.copy2(path, copy)
     if os.path.getsize(copy) != os.path.getsize(path) or _md5(copy) != _md5(path):
         os.remove(copy)
         raise OSError("the copy is not the same as the save")
-    # Only this game's copies: its name, the date and time, and nothing else.
-    own = re.compile(re.escape(stem) + r"_\d{8}_\d{6}(_\d+)?" + re.escape(ext) + r"\Z")
+    # Only this game's copies (its name, the date and time, and nothing else), by when they were
+    # made: that is in their names, whatever date the save itself carried.
+    own = re.compile(re.escape(stem) + r"_(\d{8}_\d{6})(?:_(\d+))?" + re.escape(ext) + r"\Z")
     mine = sorted(
-        (f for f in os.listdir(folder) if own.match(f)),
-        key=lambda f: (os.path.getmtime(os.path.join(folder, f)), f),
+        (m.group(1), int(m.group(2) or 0), f)
+        for f in os.listdir(folder)
+        for m in [own.match(f)] if m
     )
-    for old in mine[:-SAVE_COPIES]:
+    for _, _, old in mine[:-SAVE_COPIES]:
+        if os.path.join(folder, old) == copy:
+            continue
         try:
             os.remove(os.path.join(folder, old))
         except OSError:
@@ -915,23 +924,37 @@ def _copy_aside(path):
     return copy
 
 
-def _bring_save(server, key, save, path):
-    """Puts RomM's save where the game's save goes, whole or not at all."""
+def _get_save(server, key, save):
+    """RomM's save, whole and checked: its bytes. Raises _Stop when it did not come whole or
+    there is nothing to check it against."""
     req, _, ctx = _prepare(server, "GET", "/api/saves/%d/content" % _number(save.get("id")), key["token"], accept="*/*")
     try:
         with _opener(ctx).open(req, timeout=STALL) as r:
             raw = r.read(SAVE_MOST + 1)
     except urllib.error.HTTPError as e:
         raise _Stop("refused" if e.code in (401, 403) else "unreachable")
-    except (urllib.error.URLError, OSError, ValueError):
+    except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError):
         raise _Stop("unreachable")
     size = _number(save.get("file_size_bytes"))
-    if len(raw) > SAVE_MOST or not raw or (size and len(raw) != size):
+    told = _text(save.get("content_hash")).strip().lower()
+    md5 = told if len(told) == 32 and all(c in "0123456789abcdef" for c in told) else ""
+    if len(raw) > SAVE_MOST or not raw:
         raise _Stop("unreachable")
+    # What RomM said of it must hold: its size, and its sum when RomM gives one. With neither
+    # there is no telling a whole save from a cut one, and it is not taken.
+    if not size and not md5:
+        raise _Stop("unreachable")
+    if (size and len(raw) != size) or (md5 and hashlib.md5(raw).hexdigest() != md5):
+        raise _Stop("unreachable")
+    return raw
+
+
+def _put_save(path, raw):
+    """Writes a save where the game's save goes, whole or not at all."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".vistazo-part"
+    tmp = "%s.vistazo-part-%d" % (path, os.getpid())
     try:
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o644)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o644)
         with os.fdopen(fd, "wb") as f:
             f.write(raw)
             f.flush()
@@ -992,8 +1015,6 @@ def _sync_save(server, key, game, choice=""):
     last = last if isinstance(last, dict) and last.get("path") == path else {}
     if os.path.islink(path) or (os.path.lexists(path) and not os.path.isfile(path)):
         return {"state": "layout"}, None  # a link or a folder where the save should be: left alone
-    here = os.path.isfile(path)
-    mine = _md5(path) if here else ""
 
     def remember(save, state):
         return {"state": state}, {
@@ -1002,16 +1023,26 @@ def _sync_save(server, key, game, choice=""):
             "server_hash": _text(save.get("content_hash")), "synced_at": int(time.time()),
         }
 
-    def bring(state="brought"):
-        if here:
-            _copy_aside(path)  # raises when the copy cannot be made: then nothing is replaced
-        _bring_save(server, key, theirs, path)
-        return remember(theirs, state)
-
-    def send(state="sent"):
-        return remember(_send_save(server, key, rom_id, kind, path), state)
-
     try:
+        here = os.path.isfile(path)
+        mine = _md5(path) if here else ""
+
+        def bring(state="brought"):
+            # RomM's save first, whole and checked: a failed try costs nothing here.
+            raw = _get_save(server, key, theirs)
+            # Then the save here once more: if it changed meanwhile (the game was started), or
+            # one appeared, it is not what was decided about, and nothing is replaced.
+            now_here = os.path.isfile(path) and not os.path.islink(path)
+            if now_here != here or (now_here and _md5(path) != mine):
+                return {"state": "busy"}, None
+            if here:
+                _copy_aside(path)  # raises when the copy cannot be made: then nothing is replaced
+            _put_save(path, raw)
+            return remember(theirs, state)
+
+        def send(state="sent"):
+            return remember(_send_save(server, key, rom_id, kind, path), state)
+
         if not here and not theirs:
             return {"state": "none"}, None
         if not here:
@@ -1096,6 +1127,8 @@ def _bios_check(server, key, game):
     rom, why = _rom(server, key, _number(game.get("rom_id")))
     if not rom:
         return {"state": why}, []
+    if _number(rom.get("platform_id")) <= 0:
+        return {"state": "unsupported"}, []
     files, why = _bios_list(server, key, _number(rom.get("platform_id")))
     if files is None:
         return {"state": why}, []
@@ -1110,26 +1143,39 @@ def _bios_bring(server, key, system, f):
     """One BIOS file into its folder, whole and checked, or not at all."""
     root = _retrodeck_path("bios_path", "bios")
     folder = os.path.join(root, *[p for p in BIOS_FOLDERS[system].split("/") if p])
-    os.makedirs(folder, exist_ok=True)
-    target = os.path.join(folder, f["name"])
-    if os.path.realpath(folder) != os.path.realpath(root) and not _within(folder, root):
+    # Checked before anything is made: a link on the way must not lead outside.
+    probe = folder
+    while not os.path.lexists(probe) and probe != os.path.dirname(probe):
+        probe = os.path.dirname(probe)
+    if os.path.realpath(probe) != os.path.realpath(root) and not _within(probe, root):
         raise _Stop("retrodeck")
-    if os.path.lexists(target):
-        raise _Stop("exists")
-    if not 0 < f["size"] <= BIOS_MOST or f["size"] + SPARE > shutil.disk_usage(folder).free:
-        raise _Stop("space")
-    part = target + ".part"
+    if not f["md5"]:
+        raise _Stop("damaged")  # nothing to check it against
+    target = os.path.join(folder, f["name"])
+    part = "%s.vistazo-part-%d" % (target, os.getpid())
     job = {"state": "downloading", "done": 0, "total": f["size"], "cancel": threading.Event()}
     try:
+        os.makedirs(folder, exist_ok=True)
+        if os.path.lexists(target) or os.path.lexists(part):
+            raise _Stop("exists")
+        if not 0 < f["size"] <= BIOS_MOST or f["size"] + SPARE > shutil.disk_usage(folder).free:
+            raise _Stop("space")
         _fetch(server, key["token"], "/api/firmware/%d/content/%s" % (f["id"], urllib.parse.quote(f["name"], safe="")),
-               part, job, f["size"], ("md5", f["md5"]) if f["md5"] else None)
-        os.rename(part, target)
+               part, job, f["size"], ("md5", f["md5"]))
+        if os.path.getsize(part) != f["size"]:
+            raise _Stop("damaged")
+        os.link(part, target)  # fails when something took the name meanwhile: never written over
+    except FileExistsError:
+        raise _Stop("exists")
     except OSError as e:
         decky.logger.error("BIOS file not kept: %s", e)
         raise _Stop("disk")
     finally:
-        if os.path.lexists(part):
-            os.remove(part)
+        try:
+            if os.path.lexists(part):
+                os.remove(part)
+        except OSError:
+            pass
 
 
 class Plugin:
