@@ -60,6 +60,9 @@ class RomM:
         self.refuse = set()  # rom ids answered with 401
         self.covers = {}  # file name -> bytes
         self.searches = []  # what the games list was asked for
+        self.saves = []  # RomM's saves: dicts with "data"
+        self.uploads = []  # (query, file name) of each save sent
+        self.short_save = False  # send less of a save than announced
 
 
 romm = RomM()
@@ -80,6 +83,24 @@ def rom(rom_id, name, files=None, slug="nds", **more):
     }
 
 
+SAVE_CLOCK = [0]
+
+
+def add_save(rom_id, data, name, emulator="retroarch-melondsds", slot="autosave", **more):
+    """A save as RomM keeps it; each one a little newer than the last."""
+    import hashlib
+    SAVE_CLOCK[0] += 1
+    stem, ext = os.path.splitext(name)
+    save = {
+        "id": 100 + SAVE_CLOCK[0], "rom_id": rom_id, "file_name": "%s [2026-11-13 %02d]%s" % (stem, SAVE_CLOCK[0], ext),
+        "file_name_no_tags": name, "file_extension": ext.lstrip("."), "file_size_bytes": len(data),
+        "emulator": emulator, "slot": slot, "content_hash": hashlib.md5(data).hexdigest(),
+        "updated_at": "2026-11-13T10:%02d:00Z" % SAVE_CLOCK[0], "missing_from_fs": False, "data": data, **more,
+    }
+    romm.saves.append(save)
+    return {k: v for k, v in save.items() if k != "data"}
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -98,7 +119,21 @@ class Handler(BaseHTTPRequestHandler):
     def handle_one(self, method):
         bearer = (self.headers.get("Authorization") or "").removeprefix("Bearer ")
         length = int(self.headers.get("Content-Length") or 0)
-        body = json.loads(self.rfile.read(length)) if length else None
+        raw = self.rfile.read(length) if length else b""
+        if method == "POST" and self.path.startswith("/api/saves?"):
+            from urllib.parse import parse_qs, urlsplit
+            romm.calls.append((method, self.path, bearer))
+            if bearer not in romm.tokens:
+                return self.reply(401)
+            q = parse_qs(urlsplit(self.path).query)
+            edge = self.headers["Content-Type"].split("boundary=")[1].encode()
+            part = raw.split(b"--" + edge)[1]
+            head, _, data = part.partition(b"\r\n\r\n")
+            data = data[:-2] if data.endswith(b"\r\n") else data
+            name = head.split(b'filename="')[1].split(b'"')[0].decode()
+            romm.uploads.append((q, name))
+            return self.reply(201, add_save(int(q["rom_id"][0]), data, name, q.get("emulator", [None])[0], q.get("slot", [None])[0]))
+        body = json.loads(raw) if raw else None
         romm.calls.append((method, self.path, bearer))
         parts = self.path.split("?")[0].strip("/").split("/")
         if self.path == "/api/client-tokens/exchange":
@@ -125,6 +160,21 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(raw)))
             self.end_headers()
             self.wfile.write(raw)
+            return
+        if parts == ["api", "saves"] and method == "GET":
+            from urllib.parse import parse_qs, urlsplit
+            q = parse_qs(urlsplit(self.path).query)
+            rom_id = int(q["rom_id"][0])
+            return self.reply(200, [{k: v for k, v in s.items() if k != "data"} for s in romm.saves if s["rom_id"] == rom_id])
+        if parts[:2] == ["api", "saves"] and len(parts) == 4 and parts[3] == "content":
+            save = next((s for s in romm.saves if s["id"] == int(parts[2])), None)
+            if not save:
+                return self.reply(404)
+            data = save["data"][:-3] if romm.short_save else save["data"]
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
             return
         if parts == ["api", "roms"]:
             from urllib.parse import parse_qs, urlsplit
@@ -731,6 +781,157 @@ def test_move_in():
     check("only its own leftovers", os.listdir(data), ["something-of-vistazo"])
 
 
+def test_saves():
+    cfg = os.path.join(HOME, main.RETROARCH_CFG)
+    os.makedirs(os.path.dirname(cfg))
+
+    def flags(content="true", core="false", beside="false"):
+        with open(cfg, "w") as f:
+            f.write('savefile_directory = "~/retrodeck/saves"\nsavefiles_in_content_dir = "%s"\n'
+                    'sort_savefiles_by_content_enable = "%s"\nsort_savefiles_enable = "%s"\n' % (beside, content, core))
+
+    saves = os.path.join(HOME, "retrodeck", "saves")
+    save = os.path.join(saves, "nds", "Game.srm")
+    copies = os.path.join(saves, "nds", main.SAVE_COPIES_DIR)
+    rom_file = os.path.join(ROMS, "nds", "Game.nds")
+    romm.roms[5] = rom(5, "Game.nds")
+    with open(rom_file, "wb") as f:
+        f.write(DATA)
+
+    def write(data, path=save):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(data)
+
+    def read(path=save):
+        with open(path, "rb") as f:
+            return f.read()
+
+    def sync(choice=""):
+        return run(plugin.save_sync(500, choice))
+
+    def kept_copies():
+        return sorted(os.listdir(copies)) if os.path.isdir(copies) else []
+
+    # Where the save is: nowhere to look without RetroArch's settings, or for a game not here.
+    check("no game", sync()["state"], "game")
+    check("taken, installed", run(plugin.game_take(500, 5))["installed"], True)
+    check("no settings to read", sync()["state"], "layout")
+    flags(beside="true")
+    check("saves beside the games are not handled", sync()["state"], "layout")
+    flags()
+    check("nothing anywhere yet", (sync()["state"], romm.uploads), ("none", []))
+
+    # A save here and none in RomM: sent, as a version in the slot Tender uses too.
+    write(b"first save")
+    check("sent", sync()["state"], "sent")
+    q, name = romm.uploads[-1]
+    check("sent how", (q["rom_id"], q["emulator"], q["slot"], q["autocleanup"], q["autocleanup_limit"], name),
+          (["5"], ["retroarch-melondsds"], ["autosave"], ["true"], ["10"], "Game.srm"))
+    check("RomM has it", romm.saves[-1]["data"], b"first save")
+    with open(main.GAMES_FILE) as f:
+        record = json.load(f)["games"]["500"]["saves"]
+    check("remembered", (record["state"], record["main"]["path"], record["main"]["server_id"]), ("sent", save, romm.saves[-1]["id"]))
+    check("games file still private", mode(main.GAMES_FILE), 0o600)
+    check("nothing to do", (sync()["state"], len(romm.uploads)), ("synced", 1))
+    check("known without asking", run(plugin.save_state(500)), {"state": "synced", "changed": False})
+
+    # Played: the save changed here, RomM's did not. Sent as a new version.
+    write(b"second save, after playing")
+    check("changed here", run(plugin.save_state(500))["changed"], True)
+    check("sent again", (sync()["state"], len(romm.uploads), romm.saves[-1]["data"]), ("sent", 2, b"second save, after playing"))
+
+    # Played elsewhere: RomM has a newer one and the one here did not change. A copy first, then brought.
+    add_save(5, b"from another device", "Game.srm")
+    check("brought", sync()["state"], "brought")
+    check("the save is RomM's", read(), b"from another device")
+    check("one copy of what was here", len(kept_copies()), 1)
+    check("the copy is what was here", read(os.path.join(copies, kept_copies()[0])), b"second save, after playing")
+    check("no half-written file", [n for n in os.listdir(os.path.dirname(save)) if "part" in n], [])
+    check("nothing sent for that", len(romm.uploads), 2)
+
+    # Both changed: nothing is touched until the player says.
+    write(b"played here")
+    add_save(5, b"played there", "Game.srm")
+    got = sync()
+    check("conflict", (got["state"], got["deck"] > 0, got["romm"] > 0), ("conflict", True, True))
+    check("conflict touches nothing", (read(), len(kept_copies()), len(romm.uploads)), (b"played here", 1, 2))
+    check("still a conflict", sync()["state"], "conflict")
+    check("conflict remembered", run(plugin.save_state(500))["state"], "conflict")
+    check("keep RomM's", sync("romm")["state"], "brought")
+    check("RomM's is here, mine is in a copy", (read(), len(kept_copies())), (b"played there", 2))
+    check("my save is among the copies", b"played here" in [read(os.path.join(copies, n)) for n in kept_copies()], True)
+    write(b"played here again")
+    add_save(5, b"played there again", "Game.srm")
+    check("conflict again", sync()["state"], "conflict")
+    check("keep the Deck's", (sync("deck")["state"], romm.saves[-1]["data"], read()), ("sent", b"played here again", b"played here again"))
+    check("an odd choice chooses nothing", sync("delete everything")["state"], "synced")
+
+    # A save cut short on the way is not put in place; the one here stays (and has its copy).
+    add_save(5, b"a newer one from elsewhere", "Game.srm")
+    romm.short_save = True
+    check("cut short", sync()["state"], "unreachable")
+    check("mine untouched", read(), b"played here again")
+    check("no half-written file", [n for n in os.listdir(os.path.dirname(save)) if "part" in n], [])
+    romm.short_save = False
+
+    # When no copy can be made, nothing is replaced.
+    shutil.rmtree(copies)
+    write(b"not a folder", copies)
+    check("no copy, no replacing", sync()["state"], "disk")
+    check("mine untouched", read(), b"played here again")
+    os.remove(copies)
+    check("with a copy it goes through", (sync()["state"], read(), len(kept_copies())), ("brought", b"a newer one from elsewhere", 1))
+
+    # Only a few copies are kept: the oldest go.
+    for i in range(main.SAVE_COPIES + 3):
+        add_save(5, b"version %d" % i, "Game.srm")
+        check("brought %d" % i, sync()["state"], "brought")
+        time.sleep(0.01)
+    check("copies kept", len(kept_copies()), main.SAVE_COPIES)
+
+    # Saves of another emulator, another slot, another game or gone from RomM's disk are not this game's.
+    newest = read()
+    add_save(5, b"other emulator", "Game.srm", emulator="retroarch-desmume")
+    add_save(5, b"other slot", "Game.srm", slot="manual")
+    add_save(5, b"other name", "Another.srm")
+    add_save(5, b"gone", "Game.srm", missing_from_fs=True)
+    add_save(6, b"other game", "Game.srm")
+    check("not mine", (sync()["state"], read()), ("synced", newest))
+
+    # No save here (a reinstall): RomM's comes, and there is nothing to copy first.
+    os.remove(save)
+    before = len(kept_copies())
+    check("after a reinstall", (sync()["state"], read(), len(kept_copies())), ("brought", newest, before))
+
+    # RetroArch sorting saves by core, or not by console: the save is looked for where it then is.
+    flags(content="true", core="true")
+    by_core = os.path.join(saves, "nds", "melonDS DS", "Game.srm")
+    write(b"sorted by core", by_core)
+    sent = len(romm.uploads)
+    check("another file, nothing known of it: not sent unasked", (sync()["state"], len(romm.uploads)), ("conflict", sent))
+    check("by-core save sent on request", (sync("deck")["state"], romm.saves[-1]["data"]), ("sent", b"sorted by core"))
+    flags(content="false")
+    flat = os.path.join(saves, "Game.srm")
+    check("not sorted: brought to the saves folder itself", (sync()["state"], read(flat)), ("brought", b"sorted by core"))
+    flags()
+
+    # A console whose saves are not known yet, and a game not on the Deck.
+    os.makedirs(os.path.join(ROMS, "wii"), exist_ok=True)
+    romm.roms[40] = rom(40, "Wii.rvz", slug="wii")
+    write(DATA, os.path.join(ROMS, "wii", "Wii.rvz"))
+    run(plugin.game_take(4000, 40))
+    check("console not handled yet", run(plugin.save_sync(4000))["state"], "unsupported")
+    romm.roms[41] = rom(41, "Away.nds")
+    run(plugin.game_take(4100, 41))
+    check("game not here", run(plugin.save_sync(4100))["state"], "not-installed")
+    for appid in (500, 4000, 4100):
+        run(plugin.game_release(appid))
+    os.remove(rom_file)
+    os.remove(os.path.join(ROMS, "wii", "Wii.rvz"))
+    check("the game's own files were never touched by all this", os.path.isfile(save), True)
+
+
 try:
     test_move_in()
     test_key()
@@ -739,6 +940,7 @@ try:
     test_launcher()
     test_download()
     test_archive()
+    test_saves()
     print("ok: %d checks" % checks)
 finally:
     server.shutdown()

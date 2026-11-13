@@ -4,6 +4,7 @@
 # Vistazo draws what this hands over; nothing here draws anything.
 import asyncio
 import base64
+import datetime
 import hashlib
 import json
 import os
@@ -139,8 +140,9 @@ def _forget_key():
         pass
 
 
-def _prepare(server, method, path, token=None, body=None, accept="application/json"):
-    """The request, its body and the TLS setup for one call to RomM."""
+def _prepare(server, method, path, token=None, body=None, accept="application/json", raw=None):
+    """The request, its body and the TLS setup for one call to RomM. `raw` is a body already
+    made, with its content type: (bytes, type)."""
     req = urllib.request.Request(server["url"] + path, method=method)
     req.add_header("Accept", accept)
     req.add_header("User-Agent", "Vistazo")
@@ -150,6 +152,9 @@ def _prepare(server, method, path, token=None, body=None, accept="application/js
     if body is not None:
         data = json.dumps(body).encode("utf-8")
         req.add_header("Content-Type", "application/json")
+    elif raw is not None:
+        data = raw[0]
+        req.add_header("Content-Type", raw[1])
     ctx = None
     if server["url"].startswith("https:"):
         ctx = ssl.create_default_context(cafile=next((f for f in CA_FILES if os.path.isfile(f)), None))
@@ -159,9 +164,9 @@ def _prepare(server, method, path, token=None, body=None, accept="application/js
     return req, data, ctx
 
 
-def _request(server, method, path, token=None, body=None):
+def _request(server, method, path, token=None, body=None, raw=None):
     """One call to RomM. Returns (status, parsed JSON or None); status 0 when it could not be reached."""
-    req, data, ctx = _prepare(server, method, path, token, body)
+    req, data, ctx = _prepare(server, method, path, token, body, raw=raw)
     try:
         with _opener(ctx).open(req, data=data, timeout=TIMEOUT) as r:
             raw = r.read()
@@ -224,6 +229,7 @@ STALL = 60  # seconds without a byte before a download gives up
 SPARE = 64 * 1024 * 1024  # room left on the disk after a download
 
 _lock = threading.RLock()  # the games file, between the plugin and its downloads
+_saving = set()  # games whose save is being brought in step right now
 _jobs = {}  # appid -> {"state", "done", "total", "cancel"}: downloads since the plugin started
 
 
@@ -770,6 +776,267 @@ def _installed_path(options, rom):
     return None
 
 
+# ── Save games ──────────────────────────────────────────────────────────────────────────────────
+# For those who turn it on, a game's save is kept in step with RomM: sent there after playing,
+# brought from there when RomM has a newer one and the one here has not changed. One rule above
+# all: a save on the Deck is never replaced or removed without a copy of it made first, and when
+# both sides changed nothing is touched until the player says which one to keep.
+# RomM keeps the saves of a game in a named slot, each upload a new version; this uses the same
+# slot and the same name for the emulator as Tender does, so both see the same saves.
+SAVE_SLOT = "autosave"
+SAVE_VERSIONS = 10  # how many RomM keeps in the slot
+SAVE_COPIES = 10  # how many copies of a replaced save stay on the Deck, per game
+SAVE_COPIES_DIR = ".vistazo-backup"
+SAVE_MOST = 64 * 1024 * 1024
+# Console -> how the saves of the emulator RetroDECK starts by default are filed: the name RomM
+# knows that emulator by, the save file's ending, and RetroArch's own name for the core (its
+# folder when saves are sorted by core). Only what is in use; more as they are needed.
+SAVE_KINDS = {"nds": ("retroarch-melondsds", ".srm", "melonDS DS")}
+RETROARCH_CFG = os.path.join(".var", "app", "net.retrodeck.retrodeck", "config", "retroarch", "retroarch.cfg")
+
+
+def _retrodeck_path(key, fallback):
+    config = os.path.join(_home(), ".var", "app", "net.retrodeck.retrodeck", "config", "retrodeck", "retrodeck.json")
+    try:
+        with open(config, encoding="utf-8") as f:
+            path = json.load(f).get("paths", {}).get(key, "")
+        if isinstance(path, str) and os.path.isabs(path):
+            return os.path.realpath(path)
+    except (OSError, ValueError, AttributeError):
+        pass
+    return os.path.realpath(os.path.join(_home(), "retrodeck", fallback))
+
+
+def _retroarch_flags():
+    """RetroArch's choices about where saves go, as its settings file has them."""
+    flags = {}
+    try:
+        with open(os.path.join(_home(), RETROARCH_CFG), encoding="utf-8", errors="replace") as f:
+            for line in f:
+                key, _, value = line.partition("=")
+                key = key.strip()
+                if key in ("savefiles_in_content_dir", "sort_savefiles_by_content_enable", "sort_savefiles_enable"):
+                    flags[key] = value.strip().strip('"').lower() == "true"
+    except OSError:
+        return None
+    return flags
+
+
+def _save_file(game):
+    """Where this game's save is on the Deck: (path, kind) or (None, why). The game's file must
+    be here (the save is named after it) and its console one whose saves are known."""
+    kind = SAVE_KINDS.get(_text(game.get("system")))
+    rom = game.get("path")
+    if not kind:
+        return None, "unsupported"
+    if not isinstance(rom, str) or not game.get("installed"):
+        return None, "not-installed"
+    flags = _retroarch_flags()
+    if flags is None or flags.get("savefiles_in_content_dir"):
+        return None, "layout"  # saves beside the games, or no settings to read: not handled
+    root = _retrodeck_path("saves_path", "saves")
+    folder = root
+    if flags.get("sort_savefiles_by_content_enable"):
+        folder = os.path.join(folder, os.path.basename(os.path.dirname(rom)))
+    if flags.get("sort_savefiles_enable"):
+        folder = os.path.join(folder, kind[2])
+    stem = os.path.splitext(os.path.basename(rom))[0]
+    if not _one_name(stem):
+        return None, "layout"
+    path = os.path.join(folder, stem + kind[1])
+    if os.path.realpath(os.path.dirname(path)) != os.path.realpath(root) and not _within(os.path.dirname(path), root):
+        return None, "layout"
+    return path, kind
+
+
+def _md5(path):
+    digest = hashlib.md5()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(CHUNK), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _when(text):
+    """A date as RomM writes it, as a number to compare; 0 when it cannot be read."""
+    try:
+        return datetime.datetime.fromisoformat(str(text).replace("Z", "+00:00")).timestamp()
+    except (ValueError, TypeError):
+        return 0
+
+
+def _romm_save(server, key, rom_id, kind, stem):
+    """RomM's newest save of this game for this emulator: (the save or None, None) or (None, why)."""
+    status, saves = _request(server, "GET", "/api/saves?rom_id=%d&slot=%s" % (rom_id, SAVE_SLOT), key["token"])
+    if status == 401:
+        _forget_key()
+    if status in (401, 403):
+        return None, "refused"
+    if status != 200 or not isinstance(saves, list):
+        return None, "unreachable"
+    mine = [
+        x for x in saves
+        if isinstance(x, dict) and _number(x.get("id")) > 0 and _number(x.get("rom_id")) == rom_id
+        and _text(x.get("emulator")) == kind[0] and _text(x.get("slot")) == SAVE_SLOT
+        and "." + _text(x.get("file_extension")).lstrip(".").lower() == kind[1]
+        and _text(x.get("file_name_no_tags")).lower() in ((stem + kind[1]).lower(), stem.lower())
+        and not x.get("missing_from_fs")
+    ]
+    mine.sort(key=lambda x: (_when(x.get("updated_at")), _number(x.get("id"))), reverse=True)
+    return (mine[0] if mine else None), None
+
+
+def _copy_aside(path):
+    """A copy of a save about to be replaced, in a folder beside it; the oldest copies beyond a
+    few go. Raises OSError when the copy could not be made: then nothing may be replaced."""
+    folder = os.path.join(os.path.dirname(path), SAVE_COPIES_DIR)
+    os.makedirs(folder, exist_ok=True)
+    stem, ext = os.path.splitext(os.path.basename(path))
+    copy = os.path.join(folder, "%s_%s%s" % (stem, time.strftime("%Y%m%d_%H%M%S"), ext))
+    n = 1
+    while os.path.lexists(copy):
+        n += 1
+        copy = os.path.join(folder, "%s_%s_%d%s" % (stem, time.strftime("%Y%m%d_%H%M%S"), n, ext))
+    shutil.copy2(path, copy)
+    if os.path.getsize(copy) != os.path.getsize(path) or _md5(copy) != _md5(path):
+        os.remove(copy)
+        raise OSError("the copy is not the same as the save")
+    mine = sorted(
+        (f for f in os.listdir(folder) if f.startswith(stem + "_") and f.endswith(ext)),
+        key=lambda f: os.path.getmtime(os.path.join(folder, f)),
+    )
+    for old in mine[:-SAVE_COPIES]:
+        try:
+            os.remove(os.path.join(folder, old))
+        except OSError:
+            pass
+    return copy
+
+
+def _bring_save(server, key, save, path):
+    """Puts RomM's save where the game's save goes, whole or not at all."""
+    req, _, ctx = _prepare(server, "GET", "/api/saves/%d/content" % _number(save.get("id")), key["token"], accept="*/*")
+    try:
+        with _opener(ctx).open(req, timeout=STALL) as r:
+            raw = r.read(SAVE_MOST + 1)
+    except urllib.error.HTTPError as e:
+        raise _Stop("refused" if e.code in (401, 403) else "unreachable")
+    except (urllib.error.URLError, OSError, ValueError):
+        raise _Stop("unreachable")
+    size = _number(save.get("file_size_bytes"))
+    if len(raw) > SAVE_MOST or not raw or (size and len(raw) != size):
+        raise _Stop("unreachable")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".vistazo-part"
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o644)
+        with os.fdopen(fd, "wb") as f:
+            f.write(raw)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except OSError as e:
+        decky.logger.error("Save not written: %s", e)
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise _Stop("disk")
+
+
+def _send_save(server, key, rom_id, kind, path):
+    """Sends the save to RomM as a new version in the slot. Returns RomM's record of it."""
+    size = os.path.getsize(path)
+    if not 0 < size <= SAVE_MOST:
+        raise _Stop("save")
+    with open(path, "rb") as f:
+        content = f.read()
+    name = os.path.basename(path).replace('"', "").replace("\r", "").replace("\n", "")
+    edge = "vistazo" + hashlib.sha256(os.urandom(16)).hexdigest()[:24]
+    body = (
+        ("--%s\r\nContent-Disposition: form-data; name=\"saveFile\"; filename=\"%s\"\r\n"
+         "Content-Type: application/octet-stream\r\n\r\n" % (edge, name)).encode("utf-8")
+        + content + ("\r\n--%s--\r\n" % edge).encode("ascii")
+    )
+    query = "/api/saves?rom_id=%d&emulator=%s&slot=%s&autocleanup=true&autocleanup_limit=%d" % (
+        rom_id, urllib.parse.quote(kind[0], safe=""), SAVE_SLOT, SAVE_VERSIONS)
+    status, reply = _request(server, "POST", query, key["token"], raw=(body, "multipart/form-data; boundary=" + edge))
+    if status == 401:
+        _forget_key()
+    if status in (401, 403):
+        raise _Stop("refused")
+    if status not in (200, 201) or not isinstance(reply, dict) or _number(reply.get("id")) <= 0:
+        raise _Stop("unreachable")
+    return reply
+
+
+def _sync_save(server, key, game, choice=""):
+    """Brings one game's save in step with RomM. Returns ({"state": ...}, what to remember).
+    States: "synced" (nothing to do), "sent", "brought", "none" (no save anywhere yet),
+    "conflict" (both changed: nothing touched; `choice` "deck" or "romm" settles it), or why it
+    could not be done ("unsupported", "not-installed", "layout", "unreachable", "refused",
+    "disk", "save")."""
+    path, kind = _save_file(game)
+    if path is None:
+        return {"state": kind}, None
+    rom_id = _number(game.get("rom_id"))
+    stem = os.path.splitext(os.path.basename(path))[0]
+    theirs, why = _romm_save(server, key, rom_id, kind, stem)
+    if why:
+        return {"state": why}, None
+    last = (game.get("saves") or {}).get("main") if isinstance(game.get("saves"), dict) else None
+    # What was remembered is about one file: with the save now looked for elsewhere (RetroArch
+    # sorts them another way), it says nothing about this one.
+    last = last if isinstance(last, dict) and last.get("path") == path else {}
+    here = os.path.isfile(path) and not os.path.islink(path)
+    mine = _md5(path) if here else ""
+
+    def remember(save, state):
+        return {"state": state}, {
+            "path": path, "hash": _md5(path), "mtime": os.stat(path).st_mtime_ns,
+            "server_id": _number(save.get("id")), "server_updated_at": _text(save.get("updated_at")),
+            "server_hash": _text(save.get("content_hash")), "synced_at": int(time.time()),
+        }
+
+    def bring(state="brought"):
+        if here:
+            _copy_aside(path)  # raises when the copy cannot be made: then nothing is replaced
+        _bring_save(server, key, theirs, path)
+        return remember(theirs, state)
+
+    def send(state="sent"):
+        return remember(_send_save(server, key, rom_id, kind, path), state)
+
+    try:
+        if not here and not theirs:
+            return {"state": "none"}, None
+        if not here:
+            return bring()
+        if not theirs:
+            return send()
+        same_as_theirs = mine == _text(theirs.get("content_hash")).lower() or (
+            mine == last.get("hash") and _number(theirs.get("id")) == last.get("server_id")
+            and _text(theirs.get("updated_at")) == last.get("server_updated_at"))
+        if same_as_theirs:
+            return remember(theirs, "synced")
+        if choice == "romm":
+            return bring()
+        if choice == "deck":
+            return send()
+        mine_changed = mine != last.get("hash")
+        theirs_changed = _number(theirs.get("id")) != last.get("server_id") or _text(theirs.get("updated_at")) != last.get("server_updated_at")
+        if last and not mine_changed and theirs_changed:
+            return bring()
+        if last and mine_changed and not theirs_changed:
+            return send()
+        return {"state": "conflict", "deck": int(os.path.getmtime(path)), "romm": int(_when(theirs.get("updated_at")))}, None
+    except _Stop as stop:
+        return {"state": str(stop)}, None
+    except OSError as e:
+        decky.logger.error("Save not synced: %s", e)
+        return {"state": "disk"}, None
+
+
 class Plugin:
     async def romm_status(self):
         """"linked" (a key for the server Tender uses that may look after games), "limited" (the
@@ -976,6 +1243,61 @@ class Plugin:
                 break
             offset += LIBRARY_PAGE
         return {"ok": True, "games": games}
+
+    async def save_sync(self, appid, choice=""):
+        """Brings this game's save in step with RomM (see _sync_save). Never while a download of
+        the game is under way; the frontend never asks while the game is running."""
+        appid = _number(appid)
+        choice = choice if choice in ("deck", "romm") else ""
+        server, key = _games_key()
+        if not server:
+            return {"state": key}
+        with _lock:
+            game = _read_games()["games"].get(str(appid))
+        if not game:
+            return {"state": "game"}
+        job = _jobs.get(appid)
+        if job and job["state"] == "downloading":
+            return {"state": "busy"}
+        if appid in _saving:
+            return {"state": "busy"}
+        _saving.add(appid)
+        try:
+            out, record = await asyncio.get_running_loop().run_in_executor(None, _sync_save, server, key, game, choice)
+        finally:
+            _saving.discard(appid)
+        with _lock:
+            data = _read_games()
+            kept = data["games"].get(str(appid))
+            if kept is not None:
+                saves = kept.get("saves") if isinstance(kept.get("saves"), dict) else {}
+                if record:
+                    saves["main"] = record
+                saves["state"] = out["state"]
+                kept["saves"] = saves
+                _write_games(data)
+        return out
+
+    async def save_state(self, appid):
+        """What is known of this game's save without asking RomM: the last state, and whether
+        the save here changed since."""
+        appid = _number(appid)
+        with _lock:
+            game = _read_games()["games"].get(str(appid))
+        saves = game.get("saves") if game and isinstance(game.get("saves"), dict) else {}
+        last = saves.get("main") if isinstance(saves.get("main"), dict) else None
+        path, kind = _save_file(game) if game else (None, "game")
+        if path is None:
+            return {"state": kind}
+        changed = False
+        try:
+            if os.path.isfile(path):
+                changed = not last or os.stat(path).st_mtime_ns != last.get("mtime")
+            elif last:
+                changed = True
+        except OSError:
+            pass
+        return {"state": _text(saves.get("state")) or "unknown", "changed": changed}
 
     async def game_list(self):
         """The Steam games Vistazo looks after: {Steam number: RomM number}."""
