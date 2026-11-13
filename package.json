@@ -1,6 +1,6 @@
 {
   "name": "vistazo-romm",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "RomM games for Vistazo on the Steam Deck: fresh achievements, and games downloaded and started without leaving Vistazo.",
   "type": "module",
   "private": true,
