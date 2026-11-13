@@ -4,7 +4,15 @@ import { safe } from "./safe";
 // The one choice this add-on keeps (on the Deck, in the Steam interface's own storage): whether it
 // looks after RomM games itself, or only keeps their achievements fresh. Off until turned on.
 const KEY = "vistazo-romm:games";
-let on = safe(() => localStorage.getItem(KEY) === "1", false);
+// It used to be one of Vistazo's own settings: taken from there the first time.
+function first(): boolean {
+  const mine = safe(() => localStorage.getItem(KEY), null);
+  if (mine !== null) return mine === "1";
+  const was = safe(() => JSON.parse(localStorage.getItem("vistazo:settings") ?? "null")?.ownGames === true, false);
+  safe(() => localStorage.setItem(KEY, was ? "1" : "0"), undefined);
+  return was;
+}
+let on = first();
 const listeners = new Set<(v: boolean) => void>();
 
 export const ownGames = () => on;

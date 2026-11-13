@@ -506,6 +506,16 @@ def _move_in():
             os.remove(theirs)
         except (OSError, ValueError) as e:
             decky.logger.warning("Not moved from Vistazo: %s", e)
+    # RomM's last answers come along too, for when it is asleep.
+    kept = os.path.join(decky.DECKY_HOME, "data", "Vistazo", "romm-kept.json")
+    try:
+        if os.path.isfile(kept) and not os.path.islink(kept) and not os.path.exists(KEPT_FILE):
+            with open(kept, encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                _write_private(KEPT_FILE, data)
+    except (OSError, ValueError) as e:
+        decky.logger.warning("Last answers not moved from Vistazo: %s", e)
 
 
 class _Stop(Exception):
