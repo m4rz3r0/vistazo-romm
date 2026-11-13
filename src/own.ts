@@ -216,8 +216,12 @@ async function mend() {
   }
   // Only when nothing starts through the old launcher any more can what was left beside it go.
   if (all) tidy().catch(() => undefined);
-  else mended = false;
+  else {
+    mended = false;
+    if (l?.ok && ++mendTries < 30) setTimeout(mend, 10000);
+  }
 }
+let mendTries = 0;
 
 export const retryOwn = (appid: number) => download(appid).catch(() => null);
 export const cancelOwn = (appid: number) => cancel(appid).catch(() => null);
