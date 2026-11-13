@@ -204,14 +204,19 @@ async function mend() {
   if (mended) return;
   mended = true;
   const l = await launcher().catch(() => null);
-  if (!l?.ok) return;
-  for (const appid of owned.keys()) {
-    if (!safe(() => appStore.GetAppOverviewByAppID(appid), null)) continue;
-    safe(() => SteamClient.Apps.SetShortcutExe(appid, l.exe), undefined);
-    safe(() => SteamClient.Apps.SetShortcutStartDir(appid, l.start_dir), undefined);
+  let all = !!l?.ok;
+  for (const appid of l?.ok ? owned.keys() : []) {
+    // Steam may not know its entries yet right after it starts: tried again the next time.
+    if (!safe(() => appStore.GetAppOverviewByAppID(appid), null)) {
+      all = false;
+      continue;
+    }
+    safe(() => SteamClient.Apps.SetShortcutExe(appid, l!.exe), undefined);
+    safe(() => SteamClient.Apps.SetShortcutStartDir(appid, l!.start_dir), undefined);
   }
-  // Nothing starts through the old launcher any more: what was left beside it can go.
-  tidy().catch(() => undefined);
+  // Only when nothing starts through the old launcher any more can what was left beside it go.
+  if (all) tidy().catch(() => undefined);
+  else mended = false;
 }
 
 export const retryOwn = (appid: number) => download(appid).catch(() => null);
