@@ -1,0 +1,15 @@
+{
+  "name": "Vistazo RomM",
+  "author": "m4rz3r0",
+  "flags": [],
+  "api_version": 1,
+  "publish": {
+    "tags": [
+      "library",
+      "retro",
+      "romm"
+    ],
+    "description": "RomM games for Vistazo: fresh achievements, downloads and launch through RetroDECK.",
+    "image": ""
+  }
+}
