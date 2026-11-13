@@ -709,6 +709,23 @@ def _download(server, token, rom, job, started=lambda part: None):
     return {"path": start, "files": made, "folders": [folder], "size": sum(os.path.getsize(f) for f in made)}
 
 
+def _already_there(rom):
+    """The game's only file, when it is already whole in RetroDECK's folder for its console
+    (another program brought it, or an earlier time). None otherwise."""
+    system = _detail(rom)["system"]
+    files = _rom_files(rom)
+    name = _one_name(files[0][0]) if len(files) == 1 else None
+    if not system or not name:
+        return None
+    path = os.path.join(_roms_root(), system, name)
+    try:
+        if os.path.isfile(path) and not os.path.islink(path) and _within(path, _roms_root()) and os.path.getsize(path) == files[0][1]:
+            return os.path.realpath(path)
+    except OSError:
+        pass
+    return None
+
+
 def _installed_path(options, rom):
     """The file another program already put on the disk for this game, read from the launch
     options its shortcut had (…"<file>"), when it is one of the game's own files in RetroDECK's
@@ -990,8 +1007,9 @@ class Plugin:
             data = _read_games()
             game = data["games"].get(str(appid))
             if not game:
-                # A file the shortcut already started stays where it is, and is not Vistazo's.
-                path = _installed_path(options, rom)
+                # A file the shortcut already started stays where it is, and is not Vistazo's;
+                # so does the game's file when it is already whole in its console's folder.
+                path = _installed_path(options, rom) or _already_there(rom)
                 game = {
                     "rom_id": rom_id,
                     "platform": _text(rom.get("platform_slug")),

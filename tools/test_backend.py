@@ -565,6 +565,22 @@ def test_download():
     check("the other program's copy stays", os.path.isfile(target), True)
     os.remove(target)
 
+    # Taking a game whose file is already whole in its console's folder: installed from the start,
+    # and never Vistazo's to remove.
+    romm.roms[13] = rom(13, "Here.nds")
+    here = os.path.join(ROMS, "nds", "Here.nds")
+    with open(here, "wb") as f:
+        f.write(DATA)
+    got = run(plugin.game_take(1300, 13))
+    check("already there", (got["installed"], got["removable"]), (True, False))
+    check("not removable", run(plugin.game_remove(1300))["why"], "not-ours")
+    run(plugin.game_release(1300))
+    with open(here, "wb") as f:
+        f.write(DATA[:-5])
+    check("a partial file does not count", run(plugin.game_take(1300, 13))["installed"], False)
+    run(plugin.game_release(1300))
+    os.remove(here)
+
     # A file already there: used when whole (and never Vistazo's to remove), refused otherwise.
     romm.content[5] = DATA
     with open(target, "wb") as f:
