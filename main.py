@@ -1037,6 +1037,97 @@ def _sync_save(server, key, game, choice=""):
         return {"state": "disk"}, None
 
 
+# ── BIOS ────────────────────────────────────────────────────────────────────────────────────────
+# Some consoles need files of their own to run (their BIOS). RomM keeps them by console; this
+# says which of them are already in RetroDECK's BIOS folder and brings the missing ones, each
+# checked against RomM's own sum, never over a file that is already there.
+BIOS_MOST = 256 * 1024 * 1024
+BIOS_DEPTH = 3  # how deep in RetroDECK's BIOS folder a file is looked for by name
+# Console -> the folder inside RetroDECK's BIOS folder where its files go ("" is the folder itself).
+BIOS_FOLDERS = {"nds": "", "wii": "", "ps2": "pcsx2/bios", "psp": "", "n3ds": ""}
+
+
+def _bios_names(root):
+    """The names of the files already in RetroDECK's BIOS folder (not far down), with their sizes."""
+    found = {}
+    base = root.rstrip(os.sep).count(os.sep)
+    for folder, dirs, files in os.walk(root):
+        if folder.count(os.sep) - base >= BIOS_DEPTH:
+            dirs[:] = []
+        for name in files:
+            try:
+                found.setdefault(name.lower(), set()).add(os.path.getsize(os.path.join(folder, name)))
+            except OSError:
+                pass
+    return found
+
+
+def _bios_list(server, key, platform_id):
+    """RomM's BIOS files for one console: (list, None) or (None, why)."""
+    status, files = _request(server, "GET", "/api/firmware?platform_id=%d" % platform_id, key["token"])
+    if status == 401:
+        _forget_key()
+    if status in (401, 403):
+        return None, "refused"
+    if status != 200 or not isinstance(files, list):
+        return None, "unreachable"
+    out = []
+    for f in files:
+        name = _one_name(f.get("file_name")) if isinstance(f, dict) else None
+        if not name or _number(f.get("id")) <= 0 or f.get("missing_from_fs") or _number(f.get("platform_id")) != platform_id:
+            continue
+        md5 = _text(f.get("md5_hash")).strip().lower()
+        out.append({"id": _number(f["id"]), "name": name, "size": _number(f.get("file_size_bytes")),
+                    "md5": md5 if len(md5) == 32 and all(c in "0123456789abcdef" for c in md5) else ""})
+    return out, None
+
+
+def _bios_check(server, key, game):
+    """What RomM has for this game's console and what of it is not on the Deck yet:
+    {"state": "ok" | "missing" | "none" (RomM has nothing for it), "missing": [...], "files": n}
+    or {"state": why}."""
+    system = _text(game.get("system"))
+    if system not in BIOS_FOLDERS:
+        return {"state": "unsupported"}, []
+    rom, why = _rom(server, key, _number(game.get("rom_id")))
+    if not rom:
+        return {"state": why}, []
+    files, why = _bios_list(server, key, _number(rom.get("platform_id")))
+    if files is None:
+        return {"state": why}, []
+    root = _retrodeck_path("bios_path", "bios")
+    here = _bios_names(root) if os.path.isdir(root) else {}
+    missing = [f for f in files if f["size"] not in here.get(f["name"].lower(), ())]
+    state = "none" if not files else "missing" if missing else "ok"
+    return {"state": state, "files": len(files), "missing": [f["name"] for f in missing]}, missing
+
+
+def _bios_bring(server, key, system, f):
+    """One BIOS file into its folder, whole and checked, or not at all."""
+    root = _retrodeck_path("bios_path", "bios")
+    folder = os.path.join(root, *[p for p in BIOS_FOLDERS[system].split("/") if p])
+    os.makedirs(folder, exist_ok=True)
+    target = os.path.join(folder, f["name"])
+    if os.path.realpath(folder) != os.path.realpath(root) and not _within(folder, root):
+        raise _Stop("retrodeck")
+    if os.path.lexists(target):
+        raise _Stop("exists")
+    if not 0 < f["size"] <= BIOS_MOST or f["size"] + SPARE > shutil.disk_usage(folder).free:
+        raise _Stop("space")
+    part = target + ".part"
+    job = {"state": "downloading", "done": 0, "total": f["size"], "cancel": threading.Event()}
+    try:
+        _fetch(server, key["token"], "/api/firmware/%d/content/%s" % (f["id"], urllib.parse.quote(f["name"], safe="")),
+               part, job, f["size"], ("md5", f["md5"]) if f["md5"] else None)
+        os.rename(part, target)
+    except OSError as e:
+        decky.logger.error("BIOS file not kept: %s", e)
+        raise _Stop("disk")
+    finally:
+        if os.path.lexists(part):
+            os.remove(part)
+
+
 class Plugin:
     async def romm_status(self):
         """"linked" (a key for the server Tender uses that may look after games), "limited" (the
@@ -1243,6 +1334,49 @@ class Plugin:
                 break
             offset += LIBRARY_PAGE
         return {"ok": True, "games": games}
+
+    async def bios_state(self, appid):
+        """Whether the BIOS files RomM has for this game's console are on the Deck."""
+        appid = _number(appid)
+        server, key = _games_key()
+        if not server:
+            return {"state": key}
+        with _lock:
+            game = _read_games()["games"].get(str(appid))
+        if not game:
+            return {"state": "game"}
+        out, _ = await asyncio.get_running_loop().run_in_executor(None, _bios_check, server, key, game)
+        return out
+
+    async def bios_fetch(self, appid):
+        """Brings the BIOS files this game's console lacks. Answers as bios_state, after."""
+        appid = _number(appid)
+        server, key = _games_key()
+        if not server:
+            return {"state": key}
+        with _lock:
+            game = _read_games()["games"].get(str(appid))
+        if not game:
+            return {"state": "game"}
+        if appid in _saving:
+            return {"state": "busy"}
+        _saving.add(appid)
+
+        def run():
+            out, missing = _bios_check(server, key, game)
+            why = None
+            for f in missing:
+                try:
+                    _bios_bring(server, key, _text(game.get("system")), f)
+                except _Stop as stop:
+                    why = str(stop)
+            out, _ = _bios_check(server, key, game)
+            return {**out, "why": why} if why else out
+
+        try:
+            return await asyncio.get_running_loop().run_in_executor(None, run)
+        finally:
+            _saving.discard(appid)
 
     async def save_sync(self, appid, choice=""):
         """Brings this game's save in step with RomM (see _sync_save). Never while a download of

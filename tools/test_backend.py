@@ -63,6 +63,7 @@ class RomM:
         self.saves = []  # RomM's saves: dicts with "data"
         self.uploads = []  # (query, file name) of each save sent
         self.short_save = False  # send less of a save than announced
+        self.firmware = []  # RomM's BIOS files: dicts with "data"
 
 
 romm = RomM()
@@ -175,6 +176,19 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
+            return
+        if parts == ["api", "firmware"]:
+            from urllib.parse import parse_qs, urlsplit
+            pid = int(parse_qs(urlsplit(self.path).query)["platform_id"][0])
+            return self.reply(200, [{k: v for k, v in f.items() if k != "data"} for f in romm.firmware if f["platform_id"] == pid or f.get("stray")])
+        if parts[:2] == ["api", "firmware"] and len(parts) == 5 and parts[3] == "content":
+            f = next((x for x in romm.firmware if x["id"] == int(parts[2])), None)
+            if not f:
+                return self.reply(404)
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(f["data"])))
+            self.end_headers()
+            self.wfile.write(f["data"])
             return
         if parts == ["api", "roms"]:
             from urllib.parse import parse_qs, urlsplit
@@ -781,6 +795,67 @@ def test_move_in():
     check("only its own leftovers", os.listdir(data), ["something-of-vistazo"])
 
 
+def test_bios():
+    import hashlib
+    bios = os.path.join(HOME, "retrodeck", "bios")
+    os.makedirs(bios, exist_ok=True)
+
+    def firmware(fid, name, data, platform_id=1, **more):
+        f = {"id": fid, "platform_id": platform_id, "file_name": name, "file_size_bytes": len(data),
+             "md5_hash": hashlib.md5(data).hexdigest().upper(), "missing_from_fs": False, "data": data, **more}
+        romm.firmware.append(f)
+        return f
+
+    romm.roms[50] = rom(50, "Bios.nds", platform_id=1)
+    with open(os.path.join(ROMS, "nds", "Bios.nds"), "wb") as f:
+        f.write(DATA)
+    run(plugin.game_take(5000, 50))
+    check("RomM has none for it", run(plugin.bios_state(5000)), {"state": "none", "files": 0, "missing": []})
+    firmware(1, "bios7.bin", b"seven" * 100)
+    firmware(2, "bios9.bin", b"nine" * 100)
+    firmware(3, "firmware.bin", b"fw" * 100)
+    firmware(4, "other-console.bin", b"x", platform_id=2)
+    firmware(5, "gone.bin", b"y", missing_from_fs=True)
+    firmware(6, "../../escape.bin", b"z" * 10)
+    firmware(7, "stray.bin", b"s", platform_id=9, stray=True)
+    with open(os.path.join(bios, "BIOS7.BIN"), "wb") as f:
+        f.write(b"seven" * 100)
+    os.makedirs(os.path.join(bios, "melonDS DS"))
+    with open(os.path.join(bios, "melonDS DS", "firmware.bin"), "wb") as f:
+        f.write(b"fw" * 100)
+    got = run(plugin.bios_state(5000))
+    check("what is missing", (got["state"], got["files"], sorted(got["missing"])), ("missing", 4, ["bios9.bin", "escape.bin"]))
+    # A file of the right name and the wrong size is not the one RomM has; it is never written over.
+    with open(os.path.join(bios, "bios9.bin"), "wb") as f:
+        f.write(b"someone's own")
+    got = run(plugin.bios_fetch(5000))
+    check("in the way: left alone", (got["state"], got["why"], open(os.path.join(bios, "bios9.bin"), "rb").read()), ("missing", "exists", b"someone's own"))
+    check("the odd name came as one name, inside", os.path.isfile(os.path.join(bios, "escape.bin")), True)
+    check("nothing outside", [n for n in os.listdir(HOME) + os.listdir(os.path.dirname(bios)) if "escape" in n], [])
+    os.remove(os.path.join(bios, "bios9.bin"))
+    # RomM's sum is checked: the right size with the wrong bytes is not kept.
+    romm.firmware[1]["data"] = b"NINE" * 100
+    got = run(plugin.bios_fetch(5000))
+    check("wrong bytes", (got["state"], got["why"], os.path.exists(os.path.join(bios, "bios9.bin"))), ("missing", "damaged", False))
+    check("nothing half-done", [n for n in os.listdir(bios) if n.endswith(".part")], [])
+    romm.firmware[1]["data"] = b"nine" * 100
+    got = run(plugin.bios_fetch(5000))
+    check("brought", (got, open(os.path.join(bios, "bios9.bin"), "rb").read()), ({"state": "ok", "files": 4, "missing": []}, b"nine" * 100))
+    check("asked with the key, from RomM", [c for c in romm.calls if "/api/firmware/2/content/" in c[1]][-1][2].startswith("tok-"), True)
+    # A console with a folder of its own, and one whose files are not handled yet.
+    os.makedirs(os.path.join(ROMS, "ps2"), exist_ok=True)
+    romm.roms[51] = rom(51, "Bios.iso", slug="ps2", platform_id=3)
+    with open(os.path.join(ROMS, "ps2", "Bios.iso"), "wb") as f:
+        f.write(DATA)
+    firmware(8, "scph.bin", b"ps2" * 50, platform_id=3)
+    run(plugin.game_take(5100, 51))
+    check("in its own folder", (run(plugin.bios_fetch(5100))["state"], os.path.isfile(os.path.join(bios, "pcsx2", "bios", "scph.bin"))), ("ok", True))
+    for appid in (5000, 5100):
+        run(plugin.game_release(appid))
+    os.remove(os.path.join(ROMS, "nds", "Bios.nds"))
+    os.remove(os.path.join(ROMS, "ps2", "Bios.iso"))
+
+
 def test_saves():
     cfg = os.path.join(HOME, main.RETROARCH_CFG)
     os.makedirs(os.path.dirname(cfg))
@@ -941,6 +1016,7 @@ try:
     test_download()
     test_archive()
     test_saves()
+    test_bios()
     print("ok: %d checks" % checks)
 finally:
     server.shutdown()
