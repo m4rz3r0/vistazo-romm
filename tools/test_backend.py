@@ -305,10 +305,14 @@ def test_detail():
     main.LIBRARY_PAGE = 2
     romm.roms[30] = rom(30, "A.nds")
     romm.roms[31] = rom(31, "B.iso", slug="ngc")
-    romm.roms[32] = rom(32, "C.nds", sibling_roms=[{"id": 30}], rom_user={"is_main_sibling": False})
-    romm.roms[33] = rom(33, "D.nds", sibling_roms=[{"id": 30}], rom_user={"is_main_sibling": True})
+    romm.roms[32] = rom(32, "C.nds", sibling_roms=[{"id": 33, "is_main_sibling": True}], rom_user={"is_main_sibling": False})
+    romm.roms[33] = rom(33, "D.nds", sibling_roms=[{"id": 32, "is_main_sibling": False}], rom_user={"is_main_sibling": True})
+    # Two versions with none marked as the main one: the first stands for both.
+    romm.roms[34] = rom(34, "E.nds", sibling_roms=[{"id": 35, "is_main_sibling": False}], rom_user={"is_main_sibling": False})
+    romm.roms[35] = rom(35, "F.nds", sibling_roms=[{"id": 34, "is_main_sibling": False}], rom_user={"is_main_sibling": False})
     got = run(plugin.romm_library())
     ids = [g["rom_id"] for g in got["games"]]
+    check("first of unmarked versions", (34 in ids, 35 in ids), (True, False))
     check("library ok", (got["ok"], 32 in ids, {30, 31, 33} <= set(ids)), (True, False, True))
     check("library row", next(g for g in got["games"] if g["rom_id"] == 30), {"rom_id": 30, "name": "Game 30", "platform": "Nintendo DS", "system": "nds", "size": 300000})
     check("unknown system says so", next(g for g in got["games"] if g["rom_id"] == 31)["system"], "")

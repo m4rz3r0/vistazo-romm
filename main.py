@@ -709,6 +709,20 @@ def _download(server, token, rom, job, started=lambda part: None):
     return {"path": start, "files": made, "folders": [folder], "size": sum(os.path.getsize(f) for f in made)}
 
 
+def _stands_for_its_versions(rom):
+    """Whether this is the one to list of a game kept in several versions: the one marked as
+    the main one, or, when none is marked, the first of them."""
+    siblings = [x for x in rom.get("sibling_roms") or [] if isinstance(x, dict)]
+    if not siblings:
+        return True
+    mine = rom.get("rom_user") if isinstance(rom.get("rom_user"), dict) else {}
+    if mine.get("is_main_sibling") is True:
+        return True
+    if any(x.get("is_main_sibling") is True for x in siblings):
+        return False
+    return _number(rom.get("id")) < min(_number(x.get("id")) for x in siblings)
+
+
 def _already_there(rom):
     """The game's only file, when it is already whole in RetroDECK's folder for its console
     (another program brought it, or an earlier time). None otherwise."""
@@ -929,8 +943,7 @@ class Plugin:
             for rom in items:
                 if not isinstance(rom, dict) or _number(rom.get("id")) <= 0:
                     continue
-                mine = rom.get("rom_user") if isinstance(rom.get("rom_user"), dict) else {}
-                if rom.get("sibling_roms") and mine.get("is_main_sibling") is False:
+                if not _stands_for_its_versions(rom):
                     continue
                 d = _detail(rom)
                 games.append({"rom_id": d["rom_id"], "name": d["name"][:120], "platform": d["platform"][:60],
