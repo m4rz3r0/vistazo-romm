@@ -965,6 +965,27 @@ def test_saves():
         time.sleep(0.01)
     check("copies kept", len(kept_copies()), main.SAVE_COPIES)
 
+    # Another game whose name starts the same keeps its own copies.
+    other = os.path.join(copies, "Game_Two_20260101_000000.srm")
+    write(b"another game's copy", other)
+    add_save(5, b"one more", "Game.srm")
+    check("brought once more", sync()["state"], "brought")
+    check("the other game's copy stays", os.path.isfile(other), True)
+    os.remove(other)
+
+    # A link where the save should be is left alone.
+    real = read()
+    os.remove(save)
+    target = os.path.join(TMP, "linked-save.srm")
+    write(b"what the link points at", target)
+    os.symlink(target, save)
+    add_save(5, b"newer than the link", "Game.srm")
+    check("a link is not handled", (sync()["state"], read(target), os.path.islink(save)), ("layout", b"what the link points at", True))
+    os.remove(save)
+    romm.saves.pop()
+    write(real)
+    check("back in step", sync()["state"], "synced")
+
     # Saves of another emulator, another slot, another game or gone from RomM's disk are not this game's.
     newest = read()
     add_save(5, b"other emulator", "Game.srm", emulator="retroarch-desmume")

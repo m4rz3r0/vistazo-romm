@@ -3,16 +3,82 @@ import { PanelSection, PanelSectionRow } from "@decky/ui";
 import { useEffect, useState } from "react";
 import { Addon, AddonAction, AddonFile, AddonGame, AddonProgress, CONTRACT, VistazoApi } from "./contract";
 import { t } from "./i18n";
-import { cancelOwn, gameState, loadOwned, ownedApps, ownedRom, refreshArt, retryOwn, uninstallOwn } from "./own";
+import {
+  biosFetch,
+  biosState,
+  cancelOwn,
+  gameState,
+  loadOwned,
+  ownedApps,
+  ownedRom,
+  refreshArt,
+  retryOwn,
+  running,
+  saveState,
+  saveSync,
+  tellChanged,
+  uninstallOwn,
+} from "./own";
 import { isLinked, rommGame, rommProgress, rommStatus } from "./romm";
 import { safe } from "./safe";
 import { Settings } from "./Rows";
 import { tuckAway } from "./tuck";
-import { ownGames } from "./settings";
+import { ownGames, syncSaves } from "./settings";
 
 // Vistazo RomM hands Vistazo what it knows of RomM games; Vistazo draws it. Without Vistazo
 // installed there is nothing to show them on, and the panel says so.
 const vistazo = (): VistazoApi | null => (window as any).Vistazo ?? null;
+
+declare const SteamClient: any;
+
+// The game's save against RomM's, for its page. RomM is asked after a game, when the save here
+// changed, when the last try did not end well, and otherwise only now and then: nothing changes
+// in between on a Deck that is the only place the game is played.
+const SAVE_GOOD = 6 * 60 * 60 * 1000;
+const saveAsked = new Map<number, number>();
+const saveWord = (state: string): AddonGame["save"] =>
+  ["synced", "sent", "brought"].includes(state) ? "synced" : state === "conflict" ? "conflict" : state === "none" ? undefined : "pending";
+async function save(appid: number, anew: boolean): Promise<AddonGame["save"]> {
+  if (!syncSaves()) return undefined;
+  const known = await saveState(appid).catch(() => null);
+  if (!known || ["unsupported", "not-installed", "layout", "game"].includes(known.state)) return undefined;
+  const recent = Date.now() - (saveAsked.get(appid) ?? 0) < SAVE_GOOD;
+  if (running(appid) || (!anew && recent && !known.changed && ["synced", "sent", "brought", "conflict"].includes(known.state)))
+    return saveWord(known.state);
+  const now = await saveSync(appid, "").catch(() => null);
+  if (now && !["unreachable", "refused", "busy"].includes(now.state)) saveAsked.set(appid, Date.now());
+  return saveWord(now?.state ?? "unreachable");
+}
+// The files the console needs: asked once per game while Steam runs, and again after bringing them.
+const biosKnown = new Map<number, AddonGame["bios"]>();
+async function bios(appid: number): Promise<AddonGame["bios"]> {
+  if (biosKnown.has(appid)) return biosKnown.get(appid);
+  const b = await biosState(appid).catch(() => null);
+  const word = b?.state === "ok" ? "ok" : b?.state === "missing" ? "missing" : undefined;
+  if (b && ["ok", "missing", "none", "unsupported"].includes(b.state)) biosKnown.set(appid, word);
+  return word;
+}
+// When one of its games closes, its save goes to RomM whether or not its page is open.
+function watchSaves(): () => void {
+  const reg = safe(
+    () =>
+      SteamClient.GameSessions.RegisterForAppLifetimeNotifications((u: any) => {
+        const appid = Number(u?.unAppID);
+        if (!u || u.bRunning !== false || !syncSaves() || !ownGames() || !ownedRom(appid)) return;
+        // A moment for the emulator to finish writing.
+        setTimeout(() => {
+          saveSync(appid, "")
+            .then((now) => {
+              if (now && !["unreachable", "refused", "busy"].includes(now.state)) saveAsked.set(appid, Date.now());
+              tellChanged();
+            })
+            .catch(() => undefined);
+        }, 3000);
+      }),
+    null as any,
+  );
+  return () => safe(() => reg?.unregister(), undefined);
+}
 
 async function game(appid: number, refresh: boolean): Promise<AddonGame | null> {
   const romId = ownedRom(appid);
@@ -20,7 +86,11 @@ async function game(appid: number, refresh: boolean): Promise<AddonGame | null> 
   refreshArt(appid);
   const g = await rommGame(romId).catch(() => null);
   if (!g?.ok) return null;
-  const p = g.ra_id ? await rommProgress(g.ra_id, refresh, true).catch(() => null) : null;
+  const [p, saved, files] = await Promise.all([
+    g.ra_id ? rommProgress(g.ra_id, refresh, true).catch(() => null) : null,
+    save(appid, refresh).catch(() => undefined),
+    bios(appid).catch(() => undefined),
+  ]);
   const list = g.achievements ?? [];
   return {
     platform: g.platform || undefined,
@@ -30,6 +100,8 @@ async function game(appid: number, refresh: boolean): Promise<AddonGame | null> 
     size: g.size || undefined,
     summary: g.summary || undefined,
     stale: !!(g.kept || p?.kept),
+    save: saved,
+    bios: files,
     achievements: list.length
       ? {
           earned: p?.ok ? Number(p.earned) || 0 : 0,
@@ -75,9 +147,32 @@ async function progress(raId: number, refresh: boolean): Promise<AddonProgress |
 // On one of its own games' pages: taking the file off the Deck, when the add-on brought it.
 async function actions(appid: number): Promise<AddonAction[]> {
   if (!ownGames() || !ownedRom(appid)) return [];
+  const out: AddonAction[] = [];
+  // A save changed on both sides: the two ways out. Either keeps a copy of what it replaces.
+  if (syncSaves() && !running(appid)) {
+    const known = await saveState(appid).catch(() => null);
+    if (known?.state === "conflict") {
+      const settle = (choice: string) => async () => {
+        await saveSync(appid, choice).catch(() => null);
+        saveAsked.set(appid, Date.now());
+        tellChanged();
+      };
+      out.push({ id: "save-romm", label: t.saveUseRomm, run: settle("romm") }, { id: "save-deck", label: t.saveUseDeck, run: settle("deck") });
+    }
+  }
+  if (biosKnown.get(appid) === "missing")
+    out.push({
+      id: "bios",
+      label: t.biosGet,
+      run: async () => {
+        await biosFetch(appid).catch(() => null);
+        biosKnown.delete(appid);
+        tellChanged();
+      },
+    });
   const s = await gameState(appid).catch(() => null);
-  if (!s?.installed || !s.removable) return [];
-  return [{ id: "uninstall", label: t.uninstall, run: async () => void (await uninstallOwn(appid)) }];
+  if (s?.installed && s.removable) out.push({ id: "uninstall", label: t.uninstall, run: async () => void (await uninstallOwn(appid)) });
+  return out;
 }
 
 const addon: Addon = {
@@ -154,6 +249,7 @@ export default definePlugin(() => {
   rommStatus();
   const disconnect = connect();
   const untuck = tuckAway("Vistazo RomM", "vistazo-romm");
+  const stopSaves = watchSaves();
   return {
     name: "Vistazo RomM",
     titleView: <div>Vistazo RomM</div>,
@@ -162,6 +258,7 @@ export default definePlugin(() => {
     onDismount() {
       disconnect();
       untuck();
+      stopSaves();
     },
   };
 });

@@ -32,6 +32,17 @@ const download = callable<[appid: number], GameState>("game_download");
 const cancel = callable<[appid: number], GameState>("game_cancel");
 const remove = callable<[appid: number], GameState>("game_remove");
 export const gameState = callable<[appid: number], GameState>("game_state");
+// A game's save against RomM's, and the files its console needs.
+export interface SaveAnswer {
+  state: string;
+  changed?: boolean;
+}
+export const saveSync = callable<[appid: number, choice: string], SaveAnswer>("save_sync");
+export const saveState = callable<[appid: number], SaveAnswer>("save_state");
+export const biosState = callable<[appid: number], { state: string; missing?: string[] }>("bios_state");
+export const biosFetch = callable<[appid: number], { state: string; why?: string }>("bios_fetch");
+export const tellChanged = () => changed();
+export const running = (appid: number) => isRunning(appid);
 const tidy = callable<[], Reply>("game_tidy");
 
 // Steam number -> RomM number of the games that are the add-on's. The backend's record is the truth;

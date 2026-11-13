@@ -1,36 +1,51 @@
 import { useEffect, useState } from "react";
 import { safe } from "./safe";
 
-// The one choice this add-on keeps (on the Deck, in the Steam interface's own storage): whether it
-// looks after RomM games itself, or only keeps their achievements fresh. Off until turned on.
-const KEY = "vistazo-romm:games";
-// It used to be one of Vistazo's own settings: taken from there the first time.
-function first(): boolean {
-  const mine = safe(() => localStorage.getItem(KEY), null);
-  if (mine !== null) return mine === "1";
-  const was = safe(() => JSON.parse(localStorage.getItem("vistazo:settings") ?? "null")?.ownGames === true, false);
-  safe(() => localStorage.setItem(KEY, was ? "1" : "0"), undefined);
-  return was;
+// The choices this add-on keeps (on the Deck, in the Steam interface's own storage): whether it
+// looks after RomM games itself, and whether it keeps their saves in step with RomM. Both off
+// until turned on.
+const listeners = new Set<() => void>();
+function flag(key: string, first: () => boolean) {
+  let on = first();
+  return {
+    get: () => on,
+    set(value: boolean) {
+      if (on === value) return;
+      on = value;
+      safe(() => localStorage.setItem(key, value ? "1" : "0"), undefined);
+      listeners.forEach((fn) => fn());
+      // What Vistazo shows depends on it.
+      safe(() => (window as any).Vistazo?.changed(), undefined);
+    },
+  };
 }
-let on = first();
-const listeners = new Set<(v: boolean) => void>();
+const stored = (key: string) => safe(() => localStorage.getItem(key), null);
 
-export const ownGames = () => on;
-export function setOwnGames(value: boolean) {
-  if (on === value) return;
-  on = value;
-  safe(() => localStorage.setItem(KEY, value ? "1" : "0"), undefined);
-  listeners.forEach((fn) => fn(on));
-  // What Vistazo shows depends on it.
-  safe(() => (window as any).Vistazo?.changed(), undefined);
-}
-export function useOwnGames(): boolean {
-  const [v, set] = useState(on);
+const games = flag("vistazo-romm:games", () => {
+  const mine = stored("vistazo-romm:games");
+  if (mine !== null) return mine === "1";
+  // It used to be one of Vistazo's own settings: taken from there the first time.
+  const was = safe(() => JSON.parse(localStorage.getItem("vistazo:settings") ?? "null")?.ownGames === true, false);
+  safe(() => localStorage.setItem("vistazo-romm:games", was ? "1" : "0"), undefined);
+  return was;
+});
+const saves = flag("vistazo-romm:saves", () => stored("vistazo-romm:saves") === "1");
+
+export const ownGames = games.get;
+export const setOwnGames = games.set;
+export const syncSaves = saves.get;
+export const setSyncSaves = saves.set;
+
+function useFlag(get: () => boolean): boolean {
+  const [v, set] = useState(get());
   useEffect(() => {
-    listeners.add(set);
+    const fn = () => set(get());
+    listeners.add(fn);
     return () => {
-      listeners.delete(set);
+      listeners.delete(fn);
     };
-  }, []);
+  }, [get]);
   return v;
 }
+export const useOwnGames = () => useFlag(games.get);
+export const useSyncSaves = () => useFlag(saves.get);

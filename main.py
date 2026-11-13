@@ -901,9 +901,11 @@ def _copy_aside(path):
     if os.path.getsize(copy) != os.path.getsize(path) or _md5(copy) != _md5(path):
         os.remove(copy)
         raise OSError("the copy is not the same as the save")
+    # Only this game's copies: its name, the date and time, and nothing else.
+    own = re.compile(re.escape(stem) + r"_\d{8}_\d{6}(_\d+)?" + re.escape(ext) + r"\Z")
     mine = sorted(
-        (f for f in os.listdir(folder) if f.startswith(stem + "_") and f.endswith(ext)),
-        key=lambda f: os.path.getmtime(os.path.join(folder, f)),
+        (f for f in os.listdir(folder) if own.match(f)),
+        key=lambda f: (os.path.getmtime(os.path.join(folder, f)), f),
     )
     for old in mine[:-SAVE_COPIES]:
         try:
@@ -988,7 +990,9 @@ def _sync_save(server, key, game, choice=""):
     # What was remembered is about one file: with the save now looked for elsewhere (RetroArch
     # sorts them another way), it says nothing about this one.
     last = last if isinstance(last, dict) and last.get("path") == path else {}
-    here = os.path.isfile(path) and not os.path.islink(path)
+    if os.path.islink(path) or (os.path.lexists(path) and not os.path.isfile(path)):
+        return {"state": "layout"}, None  # a link or a folder where the save should be: left alone
+    here = os.path.isfile(path)
     mine = _md5(path) if here else ""
 
     def remember(save, state):

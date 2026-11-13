@@ -4,7 +4,7 @@ import { t } from "./i18n";
 import { GameState, addOwn, clearLostOwn, dropNotInstalled, gameState, loadOwned, lostOwn, onOwnChange, ownedApp, ownedRom, removeOwn, retryOwn, syncLibrary } from "./own";
 import { openGame } from "./page";
 import { PairAnswer, RommHealth, checkRomm, pairRomm, unlinkRomm, useRomm } from "./romm";
-import { setOwnGames, useOwnGames } from "./settings";
+import { setOwnGames, setSyncSaves, useOwnGames, useSyncSaves } from "./settings";
 
 declare const appStore: any;
 
@@ -13,12 +13,18 @@ declare const appStore: any;
 // is open.
 export function Settings() {
   const games = useOwnGames();
+  const saves = useSyncSaves();
   return (
     <PanelSection title={t.section}>
       <PanelSectionRow>
         <ToggleField label={t.ownGamesLabel} description={t.ownGamesDesc} checked={games} onChange={setOwnGames} />
       </PanelSectionRow>
       <RommRow games={games} />
+      {games && (
+        <PanelSectionRow>
+          <ToggleField label={t.savesLabel} description={t.savesDesc} checked={saves} onChange={setSyncSaves} />
+        </PanelSectionRow>
+      )}
       {games && <LibraryRow />}
       {games && <OwnRow />}
       {games && <LostRow />}
