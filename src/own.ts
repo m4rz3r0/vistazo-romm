@@ -82,6 +82,7 @@ const COVER = 0;
 const ART: [number, string][] = [
   [1, "GetCustomHeroImageURLs"],
   [2, "GetCustomLogoImageURLs"],
+  [3, "GetCustomLandscapeImageURLs"],
 ];
 
 // One of an entry's pictures as Steam wants it handed over: [base64, kind], or null.
@@ -257,6 +258,20 @@ async function tidyCollections() {
   }
 }
 
+// Which of Tender's entries is which RomM game, as Tender itself says (while it is installed):
+// the add-on's entries take their wide picture and logo from them.
+declare const DeckyBackend: any;
+async function tenderEntries(): Promise<Map<number, number>> {
+  const out = new Map<number, number>();
+  try {
+    const map = await DeckyBackend.call("loader/call_plugin_method", "Tender", "get_app_id_rom_id_map");
+    for (const [appid, romId] of Object.entries(map ?? {})) out.set(Number(romId), Number(appid));
+  } catch {
+    /* no Tender: nothing to borrow from */
+  }
+  return out;
+}
+
 let syncing = false;
 export async function syncLibrary(step: (done: number, total: number) => void): Promise<string | null> {
   if (syncing) return "busy";
@@ -279,6 +294,14 @@ export async function syncLibrary(step: (done: number, total: number) => void): 
       if (appid && g.platform) byPlatform.set(g.platform, [...(byPlatform.get(g.platform) ?? []), appid]);
     }
     await gather(byPlatform).catch((e) => console.warn("[Vistazo RomM] collections", e));
+    // Pictures from Tender's entries of the same games, for the ones that have none yet.
+    const theirs = await tenderEntries();
+    for (const g of games) {
+      const [appid, from] = [ownedApp(g.rom_id), theirs.get(g.rom_id) ?? 0];
+      if (!appid || !from) continue;
+      if (!sources()[appid]) setSource(appid, from);
+      await borrowArt(appid, sources()[appid]).catch(() => undefined);
+    }
     changed();
     return why;
   } finally {

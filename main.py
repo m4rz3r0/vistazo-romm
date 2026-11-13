@@ -313,6 +313,10 @@ def _text(v):
 # kept so its page still has something to show while RomM is asleep or out of reach.
 KEPT_FILE = os.path.join(RUNTIME, "romm-kept.json")
 KEPT_MOST = 300
+# How long what was kept is good enough to show without asking RomM again: what a game is hardly
+# ever changes; a player's achievements change when they play, and then they are asked for anew.
+GAME_GOOD = 7 * 24 * 3600
+PROGRESS_GOOD = 6 * 3600
 
 
 def _kept(kind, number):
@@ -322,6 +326,15 @@ def _kept(kind, number):
         return entry if isinstance(entry, dict) else None
     except (OSError, ValueError, AttributeError):
         return None
+
+
+def _still_good(kind, number, seconds):
+    """What was kept of this, without its date, when it is recent enough; None otherwise."""
+    entry = _kept(kind, number)
+    at = entry.get("_at") if entry else None
+    if not isinstance(at, (int, float)) or not 0 <= time.time() - at < seconds:
+        return None
+    return {k: v for k, v in entry.items() if k != "_at"}
 
 
 def _keep(kind, number, entry):
@@ -335,7 +348,7 @@ def _keep(kind, number, entry):
             data = {}
         group = data.get(kind) if isinstance(data.get(kind), dict) else {}
         group.pop(str(number), None)
-        group[str(number)] = entry  # the newest last
+        group[str(number)] = {**entry, "_at": int(time.time())}  # the newest last
         for old in list(group)[: max(0, len(group) - KEPT_MOST)]:
             del group[old]
         data[kind] = group
@@ -853,13 +866,17 @@ class Plugin:
         RetroAchievements first and this waits (up to about a minute) for the new figures.
         {"ok": False, "why": ...} when there is no key, RomM is not answering or refuses it;
         with `kept`, RomM not answering gives what it said last time instead ("kept": True)."""
+        if kept and not refresh and _read_key():
+            good = _still_good("progress", _number(ra_id), PROGRESS_GOOD)
+            if good:
+                return {"ok": True, "changed": False, **good}
         got = await self._progress(ra_id, refresh)
         if got.get("ok"):
             _keep("progress", _number(ra_id), {k: v for k, v in got.items() if k not in ("ok", "changed")})
         elif kept and got.get("why") == "unreachable":
             last = _kept("progress", _number(ra_id))
             if last:
-                return {"ok": True, "changed": False, "kept": True, **last}
+                return {"ok": True, "changed": False, "kept": True, **{k: v for k, v in last.items() if k != "_at"}}
         return got
 
     async def _progress(self, ra_id, refresh):
@@ -902,20 +919,27 @@ class Plugin:
                 return {"ok": True, "changed": False, **before}
         return {"ok": True, "changed": False, **before}
 
-    async def romm_game(self, rom_id):
+    async def romm_game(self, rom_id, anew=False):
         """One game as RomM has it, for its page. {"ok": False, "why": ...} without a key that
-        may see the games, or when RomM is not answering or refuses."""
+        may see the games, or when RomM is not answering or refuses. What a game is hardly
+        changes: a recent answer is given again without asking RomM, unless `anew`."""
         rom_id = _number(rom_id)
         if rom_id <= 0:
             return {"ok": False, "why": "game"}
         server, key = _games_key()
         if not server:
             return {"ok": False, "why": key}
+        if not anew:
+            good = _still_good("games", rom_id, GAME_GOOD)
+            if good:
+                return {"ok": True, **good}
         rom, why = await asyncio.get_running_loop().run_in_executor(None, _rom, server, key, rom_id)
         if not rom:
             # RomM asleep or out of reach: what it said last time, marked as such.
             kept = _kept("games", rom_id) if why == "unreachable" else None
-            return {"ok": True, "kept": True, **kept} if kept else {"ok": False, "why": why}
+            if kept:
+                return {"ok": True, "kept": True, **{k: v for k, v in kept.items() if k != "_at"}}
+            return {"ok": False, "why": why}
         detail = _detail(rom)
         _keep("games", rom_id, detail)
         return {"ok": True, **detail}

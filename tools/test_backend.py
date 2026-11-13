@@ -325,14 +325,32 @@ def test_detail():
     # A redirect is never followed: the key reaches no other address.
     romm.redirect_to = OTHER
     before = len(romm.calls)
-    check("redirect refused: only what was kept comes back", run(plugin.romm_game(5)).get("kept"), True)
+    check("redirect refused: only what was kept comes back", run(plugin.romm_game(5, True)).get("kept"), True)
     check("one call only, none to the other address", len(romm.calls) - before, 1)
     romm.redirect_to = None
 
+    # What a game is hardly changes: asked once, then given from what was kept, unless asked anew.
+    before = len(romm.calls)
+    again = run(plugin.romm_game(5))
+    check("given again without asking RomM", (again["ok"], again["name"], "kept" in again, "_at" in again, len(romm.calls) - before), (True, "Game 5", False, False, 0))
+    check("asked anew", (run(plugin.romm_game(5, True))["ok"], len(romm.calls) - before), (True, 1))
+    old_good = main.GAME_GOOD
+    main.GAME_GOOD = 0
+    run(plugin.romm_game(5))
+    check("too old: asked again", len(romm.calls) - before, 2)
+    main.GAME_GOOD = old_good
+    # A player's achievements: a recent reading is given again; after a game they are read anew.
+    run(plugin.romm_progress(77, False, True))
+    before = len(romm.calls)
+    check("recent achievements given again", (run(plugin.romm_progress(77, False, True))["earned"], len(romm.calls) - before), (2, 0))
+    check("the plain call always asks", (run(plugin.romm_progress(77))["earned"], len(romm.calls) - before), (2, 1))
+
     # RomM asleep: the page still gets what RomM said last time, marked as kept.
     check("progress read once", run(plugin.romm_progress(77, False, True))["earned"], 2)
+    good = main.PROGRESS_GOOD
+    main.PROGRESS_GOOD = 0  # as when the last reading is old
     server.shutdown()
-    asleep = run(plugin.romm_game(5))
+    asleep = run(plugin.romm_game(5, True))
     check("kept game", (asleep["ok"], asleep.get("kept"), asleep["name"], len(asleep["achievements"])), (True, True, "Game 5", 1))
     check("never seen game", run(plugin.romm_game(404)), {"ok": False, "why": "unreachable"})
     check("kept progress", [run(plugin.romm_progress(77, False, True)).get(k) for k in ("ok", "kept", "earned", "total")], [True, True, 2, 130])
@@ -340,7 +358,8 @@ def test_detail():
     check("asleep says so", run(plugin.romm_check()), "unreachable")
     check("kept file private", mode(main.KEPT_FILE), 0o600)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    check("awake again", "kept" in run(plugin.romm_game(5)), False)
+    main.PROGRESS_GOOD = good
+    check("awake again", "kept" in run(plugin.romm_game(5, True)), False)
 
     # Tender pointing elsewhere: the key is for the server it was paired with, and stays home.
     tender(OTHER)

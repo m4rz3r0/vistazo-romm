@@ -45,7 +45,7 @@ export interface RommGame {
   size: number;
   achievements: { badge_id: string; title: string; description: string; points: number; num_awarded: number; badge_url: string; badge_url_lock: string; order: number }[];
 }
-export const rommGame = callable<[romId: number], RommGame>("romm_game");
+export const rommGame = callable<[romId: number, anew?: boolean], RommGame>("romm_game");
 
 const status = callable<[], RommStatus>("romm_status");
 const pair = callable<[code: string, games: boolean], PairAnswer>("romm_pair");
