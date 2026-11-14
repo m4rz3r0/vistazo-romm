@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import { t } from "./i18n";
 import { GameState, RommCollection, Version, busyJob, gameEmulators, setEmulator, cancelOwn, clearGone, goneOwn, pauseOwn, playState, gameVersions, running, switchVersion, TenderGame, addOwn, rommCollections, turnCollection, giveBackTender, takeOverTender, tenderGames, tenderOn, clearLostOwn, dropNotInstalled, gameState, loadOwned, lostOwn, onOwnChange, ownedApp, ownedRom, removeOwn, retryOwn, syncLibrary } from "./own";
 import { openGame } from "./page";
+import { SgdbRow } from "./Sgdb";
 import { PairAnswer, RommHealth, ServerAnswer, checkRomm, pairRomm, rommServer, setRommServer, unlinkRomm, useRomm } from "./romm";
 import { LANGUAGES, setOwnGames, setPreferredLanguage, setSyncSaves, useOwnGames, usePreferredLanguage, useSyncSaves } from "./settings";
 
@@ -28,6 +29,7 @@ export function Settings() {
       )}
       {games && <TenderRow />}
       {games && <LanguageRow />}
+      {games && <SgdbRow />}
       {games && <LibraryRow />}
       {games && <CollectionsRow />}
       {games && <OwnRow />}

@@ -925,6 +925,166 @@ def test_cover():
     check("no games yet", run(plugin.game_list()), {})
 
 
+# ── A pretend SteamGridDB ─────────────────────────────────────────────────────────
+class SteamGridDB:
+    """What the pretend SteamGridDB knows, and what it was asked."""
+
+    def __init__(self):
+        self.calls = []  # (path with query, bearer or None)
+        self.found = {}  # search term -> autocomplete results
+        self.art = {}  # (kind as in the path, game id) -> list of results
+        self.images = {}  # file name -> bytes
+        self.refuse = False  # answer 401 to every API call
+
+
+sgdb = SteamGridDB()
+
+
+class SgdbHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *a):
+        pass
+
+    def send(self, status, raw, kind="application/json"):
+        self.send_response(status)
+        self.send_header("Content-Type", kind)
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def do_GET(self):
+        from urllib.parse import unquote, urlsplit
+        auth = self.headers.get("Authorization")
+        sgdb.calls.append((self.path, auth))
+        parts = urlsplit(self.path).path.strip("/").split("/")
+        if parts[0] == "img":
+            raw = sgdb.images.get(parts[-1])
+            return self.send(200, raw, "image/png") if raw is not None else self.send(404, b"")
+        if parts[:2] != ["api", "v2"]:
+            return self.send(404, b"")
+        if sgdb.refuse or auth != "Bearer " + SGDB_KEY:
+            return self.send(401, json.dumps({"success": False, "errors": ["Unauthorized"]}).encode())
+        if parts[2:4] == ["search", "autocomplete"]:
+            return self.send(200, json.dumps({"success": True, "data": sgdb.found.get(unquote(parts[4]), [])}).encode())
+        if len(parts) == 5 and parts[3] == "game":
+            return self.send(200, json.dumps({"success": True, "page": 0, "total": 0, "limit": 50,
+                                              "data": sgdb.art.get((parts[2], int(parts[4])), [])}).encode())
+        self.send(404, b"")
+
+
+SGDB_KEY = "0123456789abcdef0123456789abcdef"
+sgdb_server = Quiet(("127.0.0.1", 0), SgdbHandler)
+threading.Thread(target=sgdb_server.serve_forever, daemon=True).start()
+SGDB_URL = "http://127.0.0.1:%d" % sgdb_server.server_port
+
+
+def test_steamgriddb():
+    import base64
+    # Pointed at the pretend one, as the pretend RomM is: the add-on never reaches the real site here.
+    main.SGDB_API = SGDB_URL + "/api/v2"
+    main.SGDB_IMAGES = (SGDB_URL + "/img/",)
+    logged = []
+    quiet = decky.logger
+    decky.logger = types.SimpleNamespace(**{n: (lambda *a, **k: logged.append(repr((a, k)))) for n in ("info", "warning", "error", "debug")})
+    try:
+        png = b"\x89PNG\r\n\x1a\n" + b"sgdb"
+        jpg = b"\xff\xd8\xff" + b"sgdb"
+        sgdb.images = {"cover.png": png, "wide.jpg": jpg, "hero.png": png, "logo.png": png, "icon.png": png, "page.png": b"<html>"}
+        romm.roms[21] = rom(21, "Grid.nds")
+        romm.roms[22] = rom(22, "Twins.nds")
+        romm.roms[23] = rom(23, "Kept.nds", path_cover_large="/assets/romm/resources/roms/23/cover/c.png",
+                            ss_metadata={"fanart_path": "roms/1/23/fanart/f.jpg", "logo_path": "roms/1/23/logo/l.png"})
+        img = lambda name: {"id": 1, "score": 0, "url": SGDB_URL + "/img/" + name, "thumb": SGDB_URL + "/img/" + name}
+        sgdb.found = {
+            "Game 21": [{"id": 5, "name": "Game 21: Deluxe", "verified": True}, {"id": 4, "name": "Game 21", "verified": True}],
+            "Game 22": [{"id": 7, "name": "Game 22", "verified": True}, {"id": 8, "name": "GAME 22", "verified": False}],
+            "Game 23": [{"id": 9, "name": "Game 23", "verified": True}],
+        }
+        for gid in (4, 7, 8, 9):
+            sgdb.art.update({("grids", gid): [img("cover.png")], ("heroes", gid): [img("hero.png")],
+                             ("logos", gid): [img("logo.png")], ("icons", gid): [img("icon.png")]})
+        every = ["cover", "wide", "hero", "logo", "icon"]
+
+        # Without a key nothing changes and nothing is asked, not even RomM.
+        check("off without a key", run(plugin.sgdb_status()), {"on": False})
+        before = len(romm.calls)
+        check("no pictures without a key", run(plugin.sgdb_pictures(21, every)), {"ok": False, "why": "off"})
+        check("no request without a key", (sgdb.calls, len(romm.calls) - before), ([], 0))
+
+        # The key: kept for this user only, never handed back.
+        for bad in ("", "short", "has spaces in it 0123456789abcdef", "x" * 300, None):
+            check("not a key: %r" % (bad,), run(plugin.sgdb_set_key(bad)), {"result": "invalid"})
+        check("still off", run(plugin.sgdb_status()), {"on": False})
+        check("key kept", run(plugin.sgdb_set_key("  " + SGDB_KEY + "\n")), {"result": "ok"})
+        check("key file private", mode(main.SGDB_FILE), 0o600)
+        check("on", run(plugin.sgdb_status()), {"on": True})
+
+        # An exact name among others: that game, with its pictures; only the name went out.
+        got = run(plugin.sgdb_pictures(21, every))
+        check("all the pictures", (got["ok"], *((base64.b64decode(got[k]["data"]), got[k]["kind"]) for k in ("cover", "wide", "hero", "logo"))),
+              (True, (png, "png"), (png, "png"), (png, "png"), (png, "png")))
+        with open(got["icon"]["path"], "rb") as f:
+            check("icon as a file", (f.read(), got["icon"]["path"].startswith(decky.DECKY_PLUGIN_RUNTIME_DIR)), (png, True))
+        api = [p for p, _ in sgdb.calls if p.startswith("/api/")]
+        check("searched by the name only", api[0], "/api/v2/search/autocomplete/Game%2021")
+        check("asked the game found", sorted(p.split("?")[0] for p in api[1:]),
+              ["/api/v2/grids/game/4", "/api/v2/grids/game/4", "/api/v2/heroes/game/4", "/api/v2/icons/game/4", "/api/v2/logos/game/4"])
+        check("cover size asked", any("dimensions=600x900" in p for p in api), True)
+        check("wide size asked", any("dimensions=920x430" in p for p in api), True)
+        check("no adult or joke pictures", all("nsfw=false" in p and "humor=false" in p for p in api[1:]), True)
+        check("key only to the API", {a for p, a in sgdb.calls if p.startswith("/api/")} == {"Bearer " + SGDB_KEY}
+              and all(a is None for p, a in sgdb.calls if p.startswith("/img/")), True)
+        check("key never to RomM", any(SGDB_KEY in str(c) for c in romm.calls), False)
+
+        # Only the kinds asked for, and never one RomM keeps.
+        sgdb.calls.clear()
+        got = run(plugin.sgdb_pictures(21, ["hero", "nonsense"]))
+        check("only the kinds asked for", sorted(k for k in got if k != "ok"), ["hero"])
+        check("only its pictures asked", [p.split("?")[0] for p, _ in sgdb.calls if p.startswith("/api/v2/") and "search" not in p], ["/api/v2/heroes/game/4"])
+        sgdb.calls.clear()
+        check("RomM's pictures kept", run(plugin.sgdb_pictures(23, ["cover", "hero", "logo"])), {"ok": True})
+        check("nothing asked for them", sgdb.calls, [])
+        check("what RomM lacks still comes", sorted(k for k in run(plugin.sgdb_pictures(23, ["cover", "wide"])) if k != "ok"), ["wide"])
+
+        # When unsure, nothing: two games with that name, or none with it exactly.
+        sgdb.calls.clear()
+        check("two with the name: skipped", run(plugin.sgdb_pictures(22, every)), {"ok": True})
+        check("no pictures asked for either", [p for p, _ in sgdb.calls if "/game/" in p], [])
+        sgdb.found["Game 22"] = [{"id": 7, "name": "Game 22 II"}, {"id": 8, "name": "Game 2"}]
+        check("no exact name: skipped", run(plugin.sgdb_pictures(22, every)), {"ok": True})
+        check("names compared loosely", main._sgdb_match("Pokémon: Platinum", [{"id": 3, "name": "Pokemon Platinum"}, {"id": 2, "name": "Pokemon Pearl"}]), 3)
+        check("nothing found", main._sgdb_match("Game", []), None)
+
+        # Pictures that are not pictures, or from elsewhere, are left out.
+        sgdb.art[("heroes", 4)] = [{"id": 1, "url": SGDB_URL + "/img/page.png"}]
+        sgdb.art[("logos", 4)] = [{"id": 1, "url": OTHER + "/img/logo.png"}]
+        before = len(romm.calls)
+        check("bad pictures left out", run(plugin.sgdb_pictures(21, ["hero", "logo"])), {"ok": True})
+        check("nothing fetched elsewhere", len(romm.calls) - before, 1)
+
+        # A key SteamGridDB no longer takes: said so, and still never written anywhere.
+        sgdb.refuse = True
+        main._sgdb_ids.clear()
+        check("refused", run(plugin.sgdb_pictures(21, every)), {"ok": False, "why": "refused"})
+        check("refused status", run(plugin.sgdb_status()), {"on": True, "refused": True})
+        sgdb.refuse = False
+        check("a new key clears it", (run(plugin.sgdb_set_key(SGDB_KEY)), run(plugin.sgdb_status())), ({"result": "ok"}, {"on": True}))
+
+        # Forgotten: off again, and nothing asked.
+        check("forget", run(plugin.sgdb_forget()), {"ok": True})
+        check("key file gone", os.path.exists(main.SGDB_FILE), False)
+        sgdb.calls.clear()
+        check("off after forgetting", (run(plugin.sgdb_status()), run(plugin.sgdb_pictures(21, every)), sgdb.calls),
+              ({"on": False}, {"ok": False, "why": "off"}, []))
+        check("something was logged", bool(logged), True)
+        check("key never in the logs", any(SGDB_KEY in line for line in logged), False)
+    finally:
+        decky.logger = quiet
+        for rom_id in (21, 22, 23):
+            romm.roms.pop(rom_id, None)
+
+
 def test_launcher():
     nasty = os.path.join(ROMS, "nds", NASTY)
     with open(nasty, "wb") as f:
@@ -2035,6 +2195,7 @@ try:
     test_detail()
     test_collections()
     test_cover()
+    test_steamgriddb()
     test_launcher()
     test_download()
     test_archive()
@@ -2051,4 +2212,5 @@ try:
 finally:
     server.shutdown()
     other.shutdown()
+    sgdb_server.shutdown()
     shutil.rmtree(TMP, ignore_errors=True)
