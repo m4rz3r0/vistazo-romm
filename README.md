@@ -20,6 +20,11 @@ It does nothing without Vistazo installed.
 
 ## Connecting to RomM
 
+The add-on keeps RomM's address in its own settings (**RomM address**). With Tender installed it takes Tender's the
+first time and keeps it, so it goes on working once Tender is gone. A new address is kept only where RomM answers or
+nothing answers yet; for a server with a certificate of your own you can choose to accept it. A key is only ever sent
+to the address it was made for: after changing it, connect again.
+
 In RomM, under Settings › Client API Tokens, create a token and press **Pair device**; type the short code on the
 Deck. For achievements only, the token needs just Me (read and write). To look after games it also needs Assets
 (read and write), Collections (read), Firmware (read), Platforms (read) and Roms (read). A token that can do more

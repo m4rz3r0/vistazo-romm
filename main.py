@@ -40,6 +40,49 @@ TIMEOUT = 10
 CA_FILES = ("/etc/ssl/certs/ca-certificates.crt", "/etc/ca-certificates/extracted/tls-ca-bundle.pem", "/etc/pki/tls/certs/ca-bundle.crt")
 
 
+# RomM's address and whether its certificate is checked: the add-on's own, in its settings folder.
+# The first time there is none it takes Tender's (same server), and keeps it, so it goes on
+# working once Tender is gone. A key is only ever sent to the address it was made for.
+SERVER_FILE = os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "server.json")
+
+
+def _clean_url(url):
+    """The address as kept: http or https, a host, no user or password, no query; no trailing
+    slash. None when it is not one."""
+    url = str(url or "").strip().rstrip("/")
+    try:
+        parts = urllib.parse.urlsplit(url)
+        parts.port  # a port that is not a number raises here
+    except ValueError:
+        return None
+    if parts.scheme not in ("http", "https") or not parts.hostname or parts.username or parts.password:
+        return None
+    if parts.query or parts.fragment or any(c.isspace() for c in url):
+        return None
+    return url
+
+
+def _own_server():
+    try:
+        with open(SERVER_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    url = _clean_url(data.get("url")) if isinstance(data, dict) else None
+    return {"url": url, "insecure": bool(data.get("insecure", False))} if url else None
+
+
+def _server():
+    """The add-on's own address; the first time, Tender's, kept from then on."""
+    own = _own_server()
+    if own:
+        return own
+    tender = _tender_server()
+    if tender and _write_private(SERVER_FILE, tender):
+        decky.logger.info("RomM address taken from Tender")
+    return tender
+
+
 def _tender_server():
     """RomM's address and TLS choice as Tender has them (Vistazo reaches the same server). Only
     those two settings are read; Tender's key and headers are left alone."""
@@ -59,9 +102,8 @@ def _tender_server():
             continue
         if not isinstance(data, dict) or "romm_url" not in data or "romm_api_token" not in data:
             continue
-        url = str(data.get("romm_url") or "").strip().rstrip("/")
-        parts = urllib.parse.urlsplit(url)
-        if parts.scheme not in ("http", "https") or not parts.hostname or parts.username or parts.password:
+        url = _clean_url(data.get("romm_url"))
+        if not url:
             return None
         return {"url": url, "insecure": bool(data.get("romm_allow_insecure_ssl", False))}
     return None
@@ -124,7 +166,7 @@ def _games_key():
     """(server, key) when the stored key is for this server and may look after games, else
     (None, why): "unlinked", "moved" or "limited" (a key for achievements only)."""
     key = _read_key()
-    server = _tender_server()
+    server = _server()
     if not key:
         return None, "unlinked"
     if not server or key["url"] != server["url"]:
@@ -1179,12 +1221,35 @@ def _bios_bring(server, key, system, f):
             pass
 
 
+def _probe(server):
+    """Whether RomM answers at this address, without any key: "ok", "certificate" (its
+    certificate could not be checked), "not-romm" (something else answers) or "unreachable"."""
+    req, _, ctx = _prepare(server, "GET", "/api/heartbeat")
+    try:
+        with _opener(ctx).open(req, timeout=TIMEOUT) as r:
+            raw = r.read(65536)
+    except urllib.error.HTTPError:
+        return "not-romm"
+    except urllib.error.URLError as e:
+        return "certificate" if isinstance(e.reason, ssl.SSLCertVerificationError) else "unreachable"
+    except ssl.SSLCertVerificationError:
+        return "certificate"
+    except (OSError, ValueError):
+        return "unreachable"
+    # Something answered: RomM only if it is RomM's own answer (a web page there is not).
+    try:
+        body = json.loads(raw or b"null")
+    except ValueError:
+        return "not-romm"
+    return "ok" if isinstance(body, dict) and isinstance(body.get("SYSTEM"), dict) else "not-romm"
+
+
 class Plugin:
     async def romm_status(self):
-        """"linked" (a key for the server Tender uses that may look after games), "limited" (the
-        same, for achievements only), "unlinked", "moved" (Tender now points elsewhere: pair
-        again) or "no-server" (Tender has no RomM)."""
-        server = _tender_server()
+        """"linked" (a key for RomM's address that may look after games), "limited" (the same,
+        for achievements only), "unlinked", "moved" (the address changed: pair again) or
+        "no-server" (no address yet)."""
+        server = _server()
         key = _read_key()
         if not server:
             return "no-server" if not key else "moved"
@@ -1193,6 +1258,29 @@ class Plugin:
         if key["url"] != server["url"]:
             return "moved"
         return "linked" if _key_scopes(key) >= SCOPES_GAMES else "limited"
+
+    async def romm_server(self):
+        """RomM's address as the add-on has it, and whether its certificate is checked."""
+        server = _server()
+        return {"url": server["url"] if server else "", "insecure": bool(server and server.get("insecure"))}
+
+    async def romm_set_server(self, url, insecure=False):
+        """Sets RomM's address. Answers {"result"}: "ok" (RomM answered there), "unreachable"
+        (kept anyway: it may be asleep), "certificate" (not kept: its certificate could not be
+        checked; asking again with `insecure` keeps it), "not-romm" (not kept: something else
+        answers there) or "invalid" (not an address). A key made for another address is not
+        sent here: the settings ask to connect again."""
+        url = _clean_url(url)
+        if not url:
+            return {"result": "invalid"}
+        server = {"url": url, "insecure": bool(insecure) and url.startswith("https:")}
+        result = await asyncio.get_running_loop().run_in_executor(None, _probe, server)
+        if result in ("certificate", "not-romm"):
+            return {"result": result}
+        if not _write_private(SERVER_FILE, server):
+            return {"result": "error"}
+        decky.logger.info("RomM address set")
+        return {"result": result}
 
     async def romm_pair(self, code, games=False):
         """Swaps RomM's pairing code for a key. Answers {"result", "missing", "extra"}; the result
@@ -1207,7 +1295,7 @@ class Plugin:
         """Asks RomM whether the stored key still works: "ok", "refused" (forgotten here),
         "unreachable", or romm_status's answer when there is no key for this server."""
         key = _read_key()
-        server = _tender_server()
+        server = _server()
         if not key or not server or key["url"] != server["url"]:
             return await self.romm_status()
         status, me = await asyncio.get_running_loop().run_in_executor(None, _request, server, "GET", "/api/users/me", key["token"])
@@ -1221,7 +1309,7 @@ class Plugin:
         code = "".join(c for c in str(code or "").upper() if c.isalnum())
         if len(code) != 8 or any(c not in CODE_CHARS for c in code):
             return "code", none, none
-        server = _tender_server()
+        server = _server()
         if not server:
             return "no-server", none, none
         loop = asyncio.get_running_loop()
@@ -1263,7 +1351,7 @@ class Plugin:
     async def romm_unlink(self):
         """Forgets the key, and removes it at RomM when RomM answers."""
         key = _read_key()
-        server = _tender_server()
+        server = _server()
         if key and server and key["url"] == server["url"] and isinstance(key.get("id"), int):
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, _request, server, "DELETE", "/api/client-tokens/%d" % int(key["id"]), key["token"])
@@ -1294,7 +1382,7 @@ class Plugin:
         except (TypeError, ValueError):
             return {"ok": False, "why": "game"}
         key = _read_key()
-        server = _tender_server()
+        server = _server()
         if not key:
             return {"ok": False, "why": "unlinked"}
         if not server or key["url"] != server["url"]:

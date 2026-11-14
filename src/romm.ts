@@ -48,6 +48,30 @@ export interface RommGame {
 export const rommGame = callable<[romId: number, anew?: boolean], RommGame>("romm_game");
 
 const status = callable<[], RommStatus>("romm_status");
+export type ServerAnswer = "ok" | "unreachable" | "certificate" | "not-romm" | "invalid" | "error";
+const server = callable<[], { url: string; insecure: boolean }>("romm_server");
+const setServer = callable<[url: string, insecure: boolean], { result: ServerAnswer }>("romm_set_server");
+
+export async function rommServer(): Promise<{ url: string; insecure: boolean }> {
+  try {
+    return await server();
+  } catch (e) {
+    console.warn("[Vistazo] RomM address", e);
+    return { url: "", insecure: false };
+  }
+}
+
+// Sets RomM's address; the status is read again, since a key made for another one no longer counts.
+export async function setRommServer(url: string, insecure: boolean): Promise<ServerAnswer> {
+  let answer: ServerAnswer = "error";
+  try {
+    answer = (await setServer(url, insecure))?.result ?? "error";
+  } catch (e) {
+    console.warn("[Vistazo] RomM address", e);
+  }
+  await rommStatus();
+  return answer;
+}
 const pair = callable<[code: string, games: boolean], PairAnswer>("romm_pair");
 const check = callable<[], string>("romm_check");
 const unlink = callable<[], RommStatus>("romm_unlink");

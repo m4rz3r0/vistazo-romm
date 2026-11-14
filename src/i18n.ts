@@ -16,7 +16,24 @@ const es = {
   rommLabel: "Logros al terminar de jugar",
   rommUnlinked: "Para verlos nada más cerrar un juego retro, Vistazo pide a RomM que los vuelva a leer. Necesita su propia clave de RomM.",
   rommLinked: "Conectado: al cerrar un juego retro, sus logros se actualizan.",
-  rommMoved: "RomM tiene otra dirección en Tender: vuelve a conectar.",
+  rommMoved: "La dirección de RomM ha cambiado: vuelve a conectar.",
+  serverLabel: "Dirección de RomM",
+  serverNone: "Sin dirección todavía.",
+  serverSet: "Poner dirección",
+  serverChange: "Cambiar",
+  serverSteps: "La dirección con la que abres RomM en el navegador, por ejemplo https://romm.example.com.",
+  serverField: "Dirección",
+  serverKeep: "Guardar",
+  serverAsking: "Comprobando que RomM responde ahí…",
+  serverInsecure: "Aceptar su certificado aunque no se pueda comprobar",
+  serverInsecureDesc: "Solo si es tu propio servidor con un certificado hecho por ti.",
+  serverAnswer: (a: string): string =>
+    a === "ok" ? "RomM responde ahí. Guardada."
+    : a === "unreachable" ? "Guardada, pero ahora no responde. Si RomM está apagado, irá cuando se encienda."
+    : a === "certificate" ? "Su certificado no se puede comprobar. No se ha guardado."
+    : a === "not-romm" ? "Ahí responde algo que no es RomM. No se ha guardado."
+    : a === "invalid" ? "No es una dirección: empieza por https:// o http://."
+    : "No se pudo guardar.",
   rommPair: "Conectar con RomM",
   rommUnlink: "Desconectar",
   rommPairSteps:
@@ -41,7 +58,7 @@ const es = {
           ? `Esa clave puede hacer más de lo que Vistazo debe tener: ${scopeNames(a.extra)}. Se ha borrado en RomM; crea otra sin eso.`
           : `A esa clave le falta: ${scopeNames(a.missing)}. Se ha borrado en RomM; crea otra.`;
       case "no-server":
-        return "Tender no tiene RomM configurado.";
+        return "Falta la dirección de RomM.";
       case "unreachable":
         return "RomM no responde. Si estaba dormido, tarda un poco en arrancar: pide otro código y prueba de nuevo.";
       case "busy":
@@ -102,7 +119,7 @@ const es = {
       refused: "RomM ha rechazado la clave: vuelve a conectar.",
       unlinked: "Falta conectar con RomM.",
       limited: "La conexión con RomM solo sirve para los logros: vuelve a conectar.",
-      moved: "RomM tiene otra dirección en Tender: vuelve a conectar.",
+      moved: "La dirección de RomM ha cambiado: vuelve a conectar.",
       space: "No hay sitio en el disco.",
       exists: "Ya hay otro archivo con ese nombre en la carpeta del juego. No se ha tocado.",
       system: "Vistazo aún no sabe dónde guarda RetroDECK los juegos de esta consola.",
@@ -121,7 +138,24 @@ const en: typeof es = {
   rommLabel: "Achievements after playing",
   rommUnlinked: "To see them as soon as a retro game closes, Vistazo asks RomM to read them again. It needs its own RomM key.",
   rommLinked: "Connected: when a retro game closes, its achievements are updated.",
-  rommMoved: "Tender points to another RomM address: connect again.",
+  rommMoved: "RomM's address changed: connect again.",
+  serverLabel: "RomM address",
+  serverNone: "No address yet.",
+  serverSet: "Set address",
+  serverChange: "Change",
+  serverSteps: "The address you open RomM with in a browser, for example https://romm.example.com.",
+  serverField: "Address",
+  serverKeep: "Save",
+  serverAsking: "Checking that RomM answers there…",
+  serverInsecure: "Accept its certificate even if it cannot be checked",
+  serverInsecureDesc: "Only for your own server with a certificate you made yourself.",
+  serverAnswer: (a: string): string =>
+    a === "ok" ? "RomM answers there. Saved."
+    : a === "unreachable" ? "Saved, but it is not answering now. If RomM is off, it will work once it is on."
+    : a === "certificate" ? "Its certificate cannot be checked. Not saved."
+    : a === "not-romm" ? "Something that is not RomM answers there. Not saved."
+    : a === "invalid" ? "Not an address: it starts with https:// or http://."
+    : "It could not be saved.",
   rommPair: "Connect to RomM",
   rommUnlink: "Disconnect",
   rommPairSteps:
@@ -146,7 +180,7 @@ const en: typeof es = {
           ? `That key can do more than Vistazo should hold: ${scopeNames(a.extra)}. It was deleted in RomM; create another without those.`
           : `That key lacks: ${scopeNames(a.missing)}. It was deleted in RomM; create another.`;
       case "no-server":
-        return "Tender has no RomM set up.";
+        return "RomM's address is missing.";
       case "unreachable":
         return "RomM is not answering. If it was asleep it takes a while to start: get another code and try again.";
       case "busy":
@@ -207,7 +241,7 @@ const en: typeof es = {
       refused: "RomM refused the key: connect again.",
       unlinked: "Connect to RomM first.",
       limited: "The RomM connection is for achievements only: connect again.",
-      moved: "Tender points to another RomM address: connect again.",
+      moved: "RomM's address changed: connect again.",
       space: "There is no room on the disk.",
       exists: "Another file with that name is already in the game's folder. It was left alone.",
       system: "Vistazo does not know yet where RetroDECK keeps this console's games.",

@@ -3,7 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import { t } from "./i18n";
 import { GameState, addOwn, clearLostOwn, dropNotInstalled, gameState, loadOwned, lostOwn, onOwnChange, ownedApp, ownedRom, removeOwn, retryOwn, syncLibrary } from "./own";
 import { openGame } from "./page";
-import { PairAnswer, RommHealth, checkRomm, pairRomm, unlinkRomm, useRomm } from "./romm";
+import { PairAnswer, RommHealth, ServerAnswer, checkRomm, pairRomm, rommServer, setRommServer, unlinkRomm, useRomm } from "./romm";
 import { setOwnGames, setSyncSaves, useOwnGames, useSyncSaves } from "./settings";
 
 declare const appStore: any;
@@ -19,6 +19,7 @@ export function Settings() {
       <PanelSectionRow>
         <ToggleField label={t.ownGamesLabel} description={t.ownGamesDesc} checked={games} onChange={setOwnGames} />
       </PanelSectionRow>
+      <ServerRow />
       <RommRow games={games} />
       {games && (
         <PanelSectionRow>
@@ -72,6 +73,94 @@ function LibraryRow() {
         </ButtonItem>
       </PanelSectionRow>
     </>
+  );
+}
+
+// RomM's address: the add-on's own (taken from Tender's the first time). One row with the address
+// and a button to change it; the dialog checks that RomM answers there before keeping it.
+function ServerRow() {
+  const status = useRomm();
+  const [url, setUrl] = useState<string | null>(null);
+  const read = useCallback(() => {
+    rommServer().then((s) => setUrl(s.url));
+  }, []);
+  useEffect(read, [read, status]);
+  if (url === null) return null;
+  return (
+    <PanelSectionRow>
+      <ButtonItem
+        layout="below"
+        label={t.serverLabel}
+        description={url ? hostOf(url) : t.serverNone}
+        onClick={() => showModal(<ServerModal onDone={read} />)}
+      >
+        {url ? t.serverChange : t.serverSet}
+      </ButtonItem>
+    </PanelSectionRow>
+  );
+}
+
+// What the row shows of an address: without "https://", so it fits.
+const hostOf = (url: string) => url.replace(/^https?:\/\//, "");
+
+function ServerModal({ onDone, closeModal }: { onDone: () => void; closeModal?: () => void }) {
+  const [url, setUrl] = useState("");
+  const [insecure, setInsecure] = useState(false);
+  const [askCert, setAskCert] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [answer, setAnswer] = useState<ServerAnswer | null>(null);
+  useEffect(() => {
+    rommServer().then((s) => {
+      setUrl(s.url);
+      setInsecure(s.insecure);
+      setAskCert(s.insecure);
+    });
+  }, []);
+  const done = answer === "ok" || answer === "unreachable";
+  const submit = () => {
+    setBusy(true);
+    setAnswer(null);
+    setRommServer(url.trim(), insecure).then((a) => {
+      setAnswer(a);
+      setBusy(false);
+      if (a === "certificate") setAskCert(true);
+      if (a === "ok" || a === "unreachable") onDone();
+    });
+  };
+  const note = busy ? t.serverAsking : answer ? t.serverAnswer(answer) : "";
+  return (
+    <ConfirmModal
+      strTitle={t.serverLabel}
+      strDescription={t.serverSteps}
+      strOKButtonText={done ? t.rommDone : t.serverKeep}
+      bOKDisabled={busy || (!done && !url.trim())}
+      bCancelDisabled={busy}
+      bHideCloseIcon
+      closeModal={() => undefined}
+      onCancel={closeModal}
+      onOK={() => (done ? closeModal?.() : submit())}
+    >
+      {!done && (
+        <TextField
+          label={t.serverField}
+          value={url}
+          disabled={busy}
+          focusOnMount
+          onChange={(e) => {
+            setUrl(e.target.value);
+            setAnswer(null);
+          }}
+        />
+      )}
+      {!done && askCert && url.trim().startsWith("https:") && (
+        <ToggleField label={t.serverInsecure} description={t.serverInsecureDesc} checked={insecure} disabled={busy} onChange={setInsecure} />
+      )}
+      {note && (
+        <div style={{ marginTop: 14, lineHeight: 1.45, color: busy ? "rgba(255,255,255,0.6)" : done ? "#7fe0a8" : "var(--obs-warn, #ffb040)" }}>
+          {note}
+        </div>
+      )}
+    </ConfirmModal>
   );
 }
 

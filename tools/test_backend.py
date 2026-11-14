@@ -122,6 +122,16 @@ class Handler(BaseHTTPRequestHandler):
         bearer = (self.headers.get("Authorization") or "").removeprefix("Bearer ")
         length = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(length) if length else b""
+        if self.path.endswith("/api/heartbeat") and self.path != "/api/heartbeat":
+            # A web page for any other path, as RomM's own front end does.
+            raw = b"<!doctype html><title>RomM</title>"
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            return self.wfile.write(raw)
+        if self.path == "/api/heartbeat":
+            romm.calls.append((method, self.path, bearer))
+            return self.reply(200, {"SYSTEM": {"VERSION": "5.4.1"}}) if self.server is server else self.reply(404)
         if method == "POST" and self.path.startswith("/api/saves?"):
             from urllib.parse import parse_qs, urlsplit
             romm.calls.append((method, self.path, bearer))
@@ -356,6 +366,43 @@ def test_key():
     check("paired again", pair("HGFEDCBA", True)["result"], "ok")
 
 
+def test_server():
+    tender_file = os.path.join(HOME, ".config", "romm-tender", "settings.json")
+    for f in (tender_file, main.SERVER_FILE):
+        if os.path.exists(f):
+            os.remove(f)
+    check("no address anywhere", (run(plugin.romm_status()), run(plugin.romm_server())), ("no-server", {"url": "", "insecure": False}))
+
+    # The first time, Tender's address is taken and kept: it stays once Tender is gone.
+    tender(URL + "/")
+    check("Tender's address taken", run(plugin.romm_server()), {"url": URL, "insecure": False})
+    check("kept, private", mode(main.SERVER_FILE), 0o600)
+    os.remove(tender_file)
+    check("still there without Tender", run(plugin.romm_server())["url"], URL)
+
+    # Setting it: only addresses, and only where RomM answers or nothing answers yet.
+    for bad in ("", "romm.local", "ftp://romm.local", "http://user:pw@romm.local", "http://romm.local/?a=1",
+                "http://romm.local:port", "http://rom m.local", "javascript:alert(1)"):
+        check("not an address: %r" % bad, run(plugin.romm_set_server(bad)), {"result": "invalid"})
+    check("not changed by them", run(plugin.romm_server())["url"], URL)
+    before = len(romm.calls)
+    check("something else answers", run(plugin.romm_set_server(OTHER)), {"result": "not-romm"})
+    check("not kept", run(plugin.romm_server())["url"], URL)
+    check("a web page where RomM's answer should be", run(plugin.romm_set_server(URL + "/nope")), {"result": "not-romm"})
+    check("not kept either", run(plugin.romm_server())["url"], URL)
+    check("no key sent to see", [c[2] for c in romm.calls[before:]], [""])
+    import socket
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    asleep = "http://127.0.0.1:%d" % sock.getsockname()[1]
+    sock.close()
+    check("nobody there yet: kept", run(plugin.romm_set_server(asleep)), {"result": "unreachable"})
+    check("asleep address kept", run(plugin.romm_server())["url"], asleep)
+    check("RomM there", run(plugin.romm_set_server(URL + "/", True)), {"result": "ok"})
+    check("plain http never skips checks", run(plugin.romm_server()), {"url": URL, "insecure": False})
+    check("an https address can skip the check", main._clean_url("https://romm.example:8443/sub/"), "https://romm.example:8443/sub")
+
+
 def test_detail():
     romm.roms[5] = rom(5, "Game.nds")
     got = run(plugin.romm_game(5))
@@ -428,12 +475,19 @@ def test_detail():
     main.PROGRESS_GOOD = good
     check("awake again", "kept" in run(plugin.romm_game(5, True)), False)
 
-    # Tender pointing elsewhere: the key is for the server it was paired with, and stays home.
+    # Tender pointing elsewhere changes nothing: the add-on keeps its own address.
     tender(OTHER)
+    check("Tender moved, the add-on stays", run(plugin.romm_game(5))["ok"], True)
+    tender(URL)
+
+    # The add-on's own address changed: the key is for the server it was paired with, and stays home.
+    main._write_private(main.SERVER_FILE, {"url": OTHER, "insecure": False})
     before = len(romm.calls)
     check("moved", run(plugin.romm_game(5)), {"ok": False, "why": "moved"})
+    check("moved status", run(plugin.romm_status()), "moved")
     check("moved: nothing sent", len(romm.calls), before)
-    tender(URL)
+    main._write_private(main.SERVER_FILE, {"url": URL, "insecure": False})
+    check("back again", run(plugin.romm_status()), "linked")
 
 
 def test_cover():
@@ -1092,6 +1146,7 @@ def test_saves():
 
 
 try:
+    test_server()
     test_move_in()
     test_key()
     test_detail()
