@@ -1,6 +1,7 @@
 import { callable } from "@decky/api";
 import { safe } from "./safe";
 import { rommGame } from "./romm";
+import { preferredLanguage } from "./settings";
 
 // RomM games this add-on looks after itself (for those who turn it on). While Tender is installed
 // it keeps every game it has added to Steam for itself: it stops their launch to run its own
@@ -90,6 +91,8 @@ export const ownedApp = (romId: number) => {
   for (const [appid, rom] of owned) if (rom === romId) return appid;
   return 0;
 };
+// The entry of a game kept in several versions, whichever of them it starts.
+const ownedAny = (versions: number[]) => versions.map(ownedApp).find(Boolean) ?? 0;
 const isRunning = (appid: number) =>
   safe(() => (SteamUIStore.RunningApps as any[]).some((a) => Number(a.appid) === appid), false);
 
@@ -268,6 +271,9 @@ async function mend() {
     }
     safe(() => SteamClient.Apps.SetShortcutExe(appid, l!.exe), undefined);
     safe(() => SteamClient.Apps.SetShortcutStartDir(appid, l!.start_dir), undefined);
+    // What Steam hands the launcher: the game's number in RomM (it changes with the version).
+    const romId = owned.get(appid);
+    if (romId) safe(() => SteamClient.Apps.SetAppLaunchOptions(appid, String(romId)), undefined);
   }
   // Only when nothing starts through the old launcher any more can what was left beside it go.
   if (all) tidy().catch(() => undefined);
@@ -282,7 +288,9 @@ let mendTries = 0;
 // entry (its file is brought when the player asks for it on its page), gathered in one Steam
 // collection per console. Run again, it adds what is new in RomM and leaves the rest as it is.
 declare const collectionStore: any;
-const library = callable<[], Reply & { games: { rom_id: number; name: string; platform: string; system: string; size: number }[] }>("romm_library");
+type LibraryGame = { rom_id: number; name: string; platform: string; system: string; size: number; versions: number[] };
+const library = callable<[language: string], Reply & { games: LibraryGame[] }>("romm_library");
+const versionsOf = (g: LibraryGame) => (g.versions?.length ? g.versions : [g.rom_id]);
 const COLLECTION = "RomM: "; // a collection's name: "RomM: Nintendo DS"
 
 const steamCollection = (name: string) =>
@@ -336,7 +344,7 @@ export async function syncLibrary(step: (done: number, total: number) => void): 
   if (syncing) return "busy";
   syncing = true;
   try {
-    const lib = await library().catch(() => null);
+    const lib = await library(preferredLanguage()).catch(() => null);
     if (!lib?.ok) return lib?.why ?? "error";
     await loadOwned(true);
     // Only consoles whose folder in RetroDECK is known: an entry that could never start helps nobody.
@@ -344,24 +352,25 @@ export async function syncLibrary(step: (done: number, total: number) => void): 
     let done = 0;
     let why: string | null = null;
     for (const g of games) {
-      if (!ownedApp(g.rom_id)) why = (await addOwn(g.rom_id, g.name, 0, false)) ?? why;
+      // A game with an entry in any of its versions keeps that one.
+      if (!ownedAny(versionsOf(g))) why = (await addOwn(g.rom_id, g.name, 0, false)) ?? why;
       step(++done, games.length);
     }
     const byPlatform = new Map<string, number[]>();
     for (const g of games) {
-      const appid = ownedApp(g.rom_id);
+      const appid = ownedAny(versionsOf(g));
       if (appid && g.platform) byPlatform.set(g.platform, [...(byPlatform.get(g.platform) ?? []), appid]);
     }
     await gather(byPlatform).catch((e) => console.warn("[Vistazo RomM] collections", e));
     await fillShown().catch((e) => console.warn("[Vistazo RomM] collections", e));
     // Pictures from RomM first; then from Tender's entries of the same games, for what is still missing.
     for (const g of games) {
-      const appid = ownedApp(g.rom_id);
-      if (appid) await rommArt(appid, g.rom_id).catch(() => undefined);
+      const appid = ownedAny(versionsOf(g));
+      if (appid) await rommArt(appid, ownedRom(appid)).catch(() => undefined);
     }
     const theirs = await tenderEntries();
     for (const g of games) {
-      const [appid, from] = [ownedApp(g.rom_id), theirs.get(g.rom_id) ?? 0];
+      const [appid, from] = [ownedAny(versionsOf(g)), theirs.get(g.rom_id) ?? 0];
       if (!appid || !from) continue;
       if (!sources()[appid]) setSource(appid, from);
       await borrowArt(appid, sources()[appid]).catch(() => undefined);
@@ -410,23 +419,24 @@ export async function turnCollection(c: RommCollection, on: boolean, step: (done
   }
   syncing = true;
   try {
-    const lib = await library().catch(() => null);
+    const lib = await library(preferredLanguage()).catch(() => null);
     if (!lib?.ok) return lib?.why ?? "error";
     await loadOwned(true);
     const wanted = new Set(c.roms);
-    // As with the library: only games whose console's folder in RetroDECK is known.
-    const games = lib.games.filter((g) => g.system && wanted.has(g.rom_id));
+    // As with the library: only games whose console's folder in RetroDECK is known; a game is in
+    // the collection whichever of its versions RomM put there.
+    const games = lib.games.filter((g) => g.system && versionsOf(g).some((v) => wanted.has(v)));
     let done = 0;
     let why: string | null = null;
     for (const g of games) {
-      if (!ownedApp(g.rom_id)) why = (await addOwn(g.rom_id, g.name, 0, false)) ?? why;
+      if (!ownedAny(versionsOf(g))) why = (await addOwn(g.rom_id, g.name, 0, false)) ?? why;
       step(++done, games.length);
     }
-    await putIn(shownName(c), games.map((g) => ownedApp(g.rom_id)).filter(Boolean));
+    await putIn(shownName(c), games.map((g) => ownedAny(versionsOf(g))).filter(Boolean));
     // The new entries go into their console's collection too.
     const byPlatform = new Map<string, number[]>();
     for (const g of games) {
-      const appid = ownedApp(g.rom_id);
+      const appid = ownedAny(versionsOf(g));
       if (appid && g.platform) byPlatform.set(g.platform, [...(byPlatform.get(g.platform) ?? []), appid]);
     }
     await gather(byPlatform).catch((e) => console.warn("[Vistazo RomM] collections", e));
@@ -435,6 +445,41 @@ export async function turnCollection(c: RommCollection, on: boolean, step: (done
   } finally {
     syncing = false;
   }
+}
+
+// The versions RomM keeps of a game (its languages and regions), and switching the one an entry
+// starts. An installed game gets the other version brought first; its save goes with it when the
+// new version has none, and the old save stays as it is.
+export interface Version {
+  rom_id: number;
+  file: string;
+  languages: string[];
+  regions: string[];
+  achievements: boolean;
+  current: boolean;
+}
+export const gameVersions = callable<[appid: number], Reply & { versions: Version[] }>("game_versions");
+const gameSwitch = callable<[appid: number, romId: number], GameState & { options?: string; pending?: number; save?: string }>("game_switch");
+
+export async function switchVersion(appid: number, romId: number): Promise<string | null> {
+  if (isRunning(appid)) return "running";
+  const got = await gameSwitch(appid, romId).catch(() => null);
+  if (!got?.ok) return got?.why ?? "error";
+  if (got.pending) {
+    // The other version is on its way: the entry keeps starting the old one until it is here.
+    for (let tries = 0; ; tries++) {
+      await wait(1000);
+      const s = await gameState(appid).catch(() => null);
+      if (!s && tries > 60) return "unreachable";
+      if (!s || s.job?.state === "downloading") continue;
+      if (s.rom_id !== romId) return s.job?.state && s.job.state !== "installed" ? s.job.state : "error";
+      break;
+    }
+  }
+  safe(() => SteamClient.Apps.SetAppLaunchOptions(appid, String(romId)), undefined);
+  owned.set(appid, romId);
+  changed();
+  return null;
 }
 
 // Takes away the entries whose game is not on the Deck (nothing is deleted from the disk): what

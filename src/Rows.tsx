@@ -1,10 +1,10 @@
-import { ButtonItem, ConfirmModal, PanelSection, PanelSectionRow, TextField, ToggleField, showModal } from "@decky/ui";
+import { ButtonItem, ConfirmModal, DropdownItem, PanelSection, PanelSectionRow, TextField, ToggleField, showModal } from "@decky/ui";
 import { useCallback, useEffect, useState } from "react";
 import { t } from "./i18n";
-import { GameState, RommCollection, TenderGame, addOwn, rommCollections, turnCollection, giveBackTender, takeOverTender, tenderGames, tenderOn, clearLostOwn, dropNotInstalled, gameState, loadOwned, lostOwn, onOwnChange, ownedApp, ownedRom, removeOwn, retryOwn, syncLibrary } from "./own";
+import { GameState, RommCollection, Version, gameVersions, running, switchVersion, TenderGame, addOwn, rommCollections, turnCollection, giveBackTender, takeOverTender, tenderGames, tenderOn, clearLostOwn, dropNotInstalled, gameState, loadOwned, lostOwn, onOwnChange, ownedApp, ownedRom, removeOwn, retryOwn, syncLibrary } from "./own";
 import { openGame } from "./page";
 import { PairAnswer, RommHealth, ServerAnswer, checkRomm, pairRomm, rommServer, setRommServer, unlinkRomm, useRomm } from "./romm";
-import { setOwnGames, setSyncSaves, useOwnGames, useSyncSaves } from "./settings";
+import { LANGUAGES, setOwnGames, setPreferredLanguage, setSyncSaves, useOwnGames, usePreferredLanguage, useSyncSaves } from "./settings";
 
 declare const appStore: any;
 
@@ -27,6 +27,7 @@ export function Settings() {
         </PanelSectionRow>
       )}
       {games && <TenderRow />}
+      {games && <LanguageRow />}
       {games && <LibraryRow />}
       {games && <CollectionsRow />}
       {games && <OwnRow />}
@@ -52,9 +53,11 @@ function TenderRow() {
   }, []);
   useEffect(read, [read]);
   useOwnChanges(read);
-  if (status !== "linked" || !list?.length) return null;
   const on = tenderOn();
-  const theirs = list.filter((g) => !g.mine).length;
+  const theirs = (list ?? []).filter((g) => !g.mine).length;
+  // Once Tender is gone and its games are all here, there is nothing left to do with them.
+  const installed = on || !!(DeckyPluginLoader?.deckyState?.publicState?.()?.installedPlugins ?? []).some((p: any) => p?.name === "Tender");
+  if (status !== "linked" || !list?.length || (!theirs && !installed)) return null;
   const mine = list.length - theirs;
   const run = (what: () => Promise<string | null>, done: string) => {
     setBusy(true);
@@ -135,6 +138,80 @@ function LibraryRow() {
         </ButtonItem>
       </PanelSectionRow>
     </>
+  );
+}
+
+// Which version of a game new entries use, when RomM keeps several (languages, regions).
+function LanguageRow() {
+  const status = useRomm();
+  const language = usePreferredLanguage();
+  if (status !== "linked") return null;
+  return (
+    <PanelSectionRow>
+      <DropdownItem
+        label={t.languageLabel}
+        description={t.languageDesc}
+        rgOptions={LANGUAGES.map((l) => ({ data: l, label: l ? t.languageName(l) : t.languageMain }))}
+        selectedOption={language}
+        onChange={(o) => setPreferredLanguage(String(o.data))}
+      />
+    </PanelSectionRow>
+  );
+}
+
+// What one version is called in the list, short enough to fit: its languages, with its regions
+// only when another version has the same languages.
+const langsOf = (v: Version) => v.languages.map(t.languageName).join(", ");
+const versionName = (v: Version, all: Version[]) => {
+  const langs = langsOf(v);
+  const twin = all.some((o) => o !== v && langsOf(o) === langs);
+  const regions = v.regions.map(t.regionName).join(", ");
+  return (twin || !langs ? [langs, regions].filter(Boolean).join(" · ") : langs) || v.file;
+};
+
+// The open game's version, when RomM keeps more than one.
+function VersionRow({ appid, state, onDone }: { appid: number; state: GameState | null; onDone: () => void }) {
+  const [list, setList] = useState<Version[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [said, setSaid] = useState<string | null>(null);
+  const read = useCallback(() => {
+    gameVersions(appid)
+      .then((r) => setList(r.ok ? r.versions : null))
+      .catch(() => setList(null));
+  }, [appid]);
+  useEffect(read, [read]);
+  if (!list || list.length < 2) return null;
+  const mine = list.find((v) => v.current);
+  const current = mine?.rom_id ?? 0;
+  const job = state?.job;
+  const bringing = busy && job?.state === "downloading";
+  const change = (romId: number) => {
+    if (romId === current) return;
+    if (running(appid)) return setSaid(t.ownWhy("running"));
+    setBusy(true);
+    setSaid(null);
+    switchVersion(appid, romId).then((why) => {
+      setSaid(why ? t.ownWhy(why) : t.versionDone);
+      setBusy(false);
+      read();
+      onDone();
+    });
+  };
+  return (
+    <PanelSectionRow>
+      <DropdownItem
+        label={t.versionLabel}
+        description={
+          bringing
+            ? t.versionBringing(job?.total ? Math.floor((100 * job.done) / job.total) : 0)
+            : (said ?? (mine && !mine.achievements ? `${t.versionNoAchievements} ${t.versionDesc}` : t.versionDesc))
+        }
+        disabled={busy || job?.state === "downloading"}
+        rgOptions={list.map((v) => ({ data: v.rom_id, label: versionName(v, list) }))}
+        selectedOption={current}
+        onChange={(o) => change(Number(o.data))}
+      />
+    </PanelSectionRow>
   );
 }
 
@@ -553,6 +630,7 @@ function OwnRow() {
           {appid ? t.ownRemove : t.ownAdd}
         </ButtonItem>
       </PanelSectionRow>
+      {!!appid && <VersionRow appid={appid} state={state} onDone={() => setTick((n) => n + 1)} />}
       {!!appid && !!state && !state.installed && job !== "downloading" && (
         <PanelSectionRow>
           <ButtonItem layout="below" disabled={busy} onClick={() => act(() => retryOwn(appid).then(() => null))}>

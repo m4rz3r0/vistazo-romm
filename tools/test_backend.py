@@ -607,7 +607,7 @@ def test_detail():
     ids = [g["rom_id"] for g in got["games"]]
     check("first of unmarked versions", (34 in ids, 35 in ids), (True, False))
     check("library ok", (got["ok"], 32 in ids, {30, 31, 33} <= set(ids)), (True, False, True))
-    check("library row", next(g for g in got["games"] if g["rom_id"] == 30), {"rom_id": 30, "name": "Game 30", "platform": "Nintendo DS", "system": "nds", "size": 300000})
+    check("library row", next(g for g in got["games"] if g["rom_id"] == 30), {"rom_id": 30, "name": "Game 30", "platform": "Nintendo DS", "system": "nds", "size": 300000, "versions": [30]})
     check("unknown system says so", next(g for g in got["games"] if g["rom_id"] == 31)["system"], "")
     check("asked in pages", [q["offset"][0] for q in romm.searches[-((len(romm.roms) + 2) // 2):]][:2], ["0", "2"])
     check("asked small", romm.searches[-1]["with_filter_values"], ["false"])
@@ -667,6 +667,110 @@ def test_detail():
     check("moved: nothing sent", len(romm.calls), before)
     main._write_private(main.SERVER_FILE, {"url": URL, "insecure": False})
     check("back again", run(plugin.romm_status()), "linked")
+
+
+def test_versions():
+    cfg = os.path.join(HOME, main.RETROARCH_CFG)
+    os.makedirs(os.path.dirname(cfg), exist_ok=True)
+    with open(cfg, "w") as f:
+        f.write('savefiles_in_content_dir = "false"\nsort_savefiles_by_content_enable = "true"\nsort_savefiles_enable = "false"\n')
+    saves = os.path.join(HOME, "retrodeck", "saves", "nds")
+    en, es = os.path.join(ROMS, "nds", "White (En).nds"), os.path.join(ROMS, "nds", "Blanca (Es).nds")
+    en_save, es_save = os.path.join(saves, "White (En).srm"), os.path.join(saves, "Blanca (Es).srm")
+    before = dict(romm.roms)
+    romm.roms.clear()
+    romm.roms[60] = rom(60, "White (En).nds", languages=["English"], regions=["USA", "Europe"],
+                        sibling_roms=[{"id": 61, "is_main_sibling": False}], rom_user={"is_main_sibling": False})
+    romm.roms[61] = rom(61, "Blanca (Es).nds", languages=["Spanish"], regions=["Spain"], ra_id=None,
+                        sibling_roms=[{"id": 60, "is_main_sibling": False}], rom_user={"is_main_sibling": False})
+    romm.roms[62] = rom(62, "Other.nds", languages=["English"])
+    romm.roms[63] = rom(63, "Cube.iso", slug="ngc", sibling_roms=[{"id": 60}])  # another console, wrongly linked
+    romm.content[60] = romm.content[61] = DATA
+
+    # The library: one row per game with all its versions; the preferred language picks which.
+    rows = {g["rom_id"]: g["versions"] for g in run(plugin.romm_library())["games"]}
+    check("main version by default", (60 in rows, 61 in rows, rows.get(60), rows.get(62)), (True, False, [60, 61, 63], [62]))
+    rows = {g["rom_id"]: g["versions"] for g in run(plugin.romm_library("Spanish"))["games"]}
+    check("Spanish first", (61 in rows, 60 in rows, rows.get(61)), (True, False, [60, 61, 63]))
+    check("a language none has", 60 in {g["rom_id"] for g in run(plugin.romm_library("Klingon"))["games"]}, True)
+
+    # Its versions, as the panel lists them.
+    check("take", run(plugin.game_take(700, 60))["installed"], False)
+    got = run(plugin.game_versions(700))
+    check("versions", [(v["rom_id"], v["languages"], v["regions"], v["achievements"], v["current"]) for v in got["versions"]],
+          [(60, ["English"], ["USA", "Europe"], True, True), (61, ["Spanish"], ["Spain"], False, False)])
+    check("versions of nothing", run(plugin.game_versions(999)), {"ok": False, "why": "game"})
+
+    # Not installed: switched at once. Only a version of the same game on the same console.
+    check("not a version of it", run(plugin.game_switch(700, 62)), {"ok": False, "why": "game"})
+    romm.roms[60]["sibling_roms"].append({"id": 63})
+    check("not on the same console", run(plugin.game_switch(700, 63)), {"ok": False, "why": "game"})
+    romm.roms[60]["sibling_roms"].pop()
+    done = run(plugin.game_switch(700, 61))
+    check("switched at once", (done["ok"], done["options"], done["rom_id"], done["installed"], "pending" in done), (True, "61", 61, False, False))
+    check("back", run(plugin.game_switch(700, 60))["options"], "60")
+
+    # Installed with a save: the other version comes first; the save goes with it; the old file goes.
+    run(plugin.game_download(700))
+    check("English here", (wait(700)["installed"], os.path.isfile(en)), (True, True))
+    os.makedirs(saves, exist_ok=True)
+    with open(en_save, "wb") as f:
+        f.write(b"my team")
+    started = run(plugin.game_switch(700, 61))
+    check("on its way", (started["ok"], started["pending"], started["rom_id"]), (True, 61, 60))
+    state = wait(700)
+    check("switched", (state["job"]["state"], state["rom_id"], state["installed"]), ("installed", 61, True))
+    check("files", (os.path.isfile(es), os.path.exists(en)), (True, False))
+    with open(es_save, "rb") as f, open(en_save, "rb") as g:
+        check("save carried, old one kept", (f.read(), g.read()), (b"my team", b"my team"))
+    with open(main.LAUNCH_FILE) as f:
+        check("launch list", json.load(f), {"61": es})
+    check("what is known of the old save is not the new one's", main._read_games()["games"]["700"]["saves"], {})
+
+    # Back again: the new version has its own save now, so neither is touched.
+    with open(es_save, "wb") as f:
+        f.write(b"played in Spanish")
+    with open(en_save, "wb") as f:
+        f.write(b"english later")
+    run(plugin.game_switch(700, 60))
+    check("back, installed", wait(700)["rom_id"], 60)
+    with open(es_save, "rb") as f, open(en_save, "rb") as g:
+        check("both saves as they were", (f.read(), g.read()), (b"played in Spanish", b"english later"))
+    check("files back", (os.path.isfile(en), os.path.exists(es)), (True, False))
+
+    # A file the add-on did not bring stays, and one already whole on the disk is used as it is.
+    with open(es, "wb") as f:
+        f.write(DATA)
+    calls = len(romm.calls)
+    now = run(plugin.game_switch(700, 61))
+    check("already there: at once", (now["options"], now["installed"], now["removable"]), ("61", True, False))
+    check("nothing downloaded", [c for c in romm.calls[calls:] if "/content/" in c[1]], [])
+    check("old one ours: gone", os.path.exists(en), False)
+    run(plugin.game_switch(700, 60))
+    check("back: brought", wait(700)["rom_id"], 60)
+    check("the one not ours stays", os.path.isfile(es), True)
+
+    # Cancelled on the way: nothing changes.
+    def slow(h):
+        time.sleep(0.6)
+        h.reply(500)
+    romm.content[61] = slow
+    os.remove(es)
+    run(plugin.game_switch(700, 61))
+    check("no second switch meanwhile", run(plugin.game_switch(700, 61)).get("why"), "busy")
+    check("nor a save sync", run(plugin.save_sync(700))["state"], "busy")
+    run(plugin.game_cancel(700))
+    state = wait(700)
+    check("stopped: still the old one", (state["rom_id"], state["installed"], os.path.isfile(en), os.path.exists(es)), (60, True, True, False))
+    check("nothing pending", "switching" in main._read_games()["games"]["700"], False)
+    romm.content[61] = DATA
+
+    for path in (en, es, en_save, es_save):
+        if os.path.exists(path):
+            os.remove(path)
+    run(plugin.game_release(700))
+    romm.roms.clear()
+    romm.roms.update(before)
 
 
 def test_collections():
@@ -1399,6 +1503,7 @@ try:
     test_download()
     test_archive()
     test_saves()
+    test_versions()
     test_bios()
     test_adopt()
     print("ok: %d checks" % checks)

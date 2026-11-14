@@ -104,6 +104,14 @@ const es = {
   libraryDone: "Biblioteca al día.",
   libraryDrop: "Quitar los no instalados",
   libraryDropped: "Quedan solo los juegos instalados.",
+  languageLabel: "Idioma de los juegos",
+  languageDesc: "Qué versión de cada juego usan las entradas nuevas, cuando RomM tiene varias.",
+  languageMain: "La principal de RomM",
+  versionLabel: "Versión",
+  versionDesc: "La partida pasa a la versión nueva si esta no tiene una; la de la otra versión se queda guardada.",
+  versionBringing: (n: number) => `Trayendo la otra versión: ${n} %. Mientras, se juega la de antes.`,
+  versionDone: "Versión cambiada.",
+  versionNoAchievements: "Esta versión no tiene logros en RetroAchievements.",
   collectionsLabel: "Colecciones de RomM",
   collectionsDesc: "Elige qué colecciones de RomM ver también en Steam.",
   collectionsOn: (n: number) => (n === 1 ? "1 colección de RomM se ve en Steam." : `${n} colecciones de RomM se ven en Steam.`),
@@ -114,6 +122,10 @@ const es = {
   collectionsGames: (n: number) => (n === 1 ? "1 juego" : `${n} juegos`),
   collectionsDone: (name: string) => `«${name}» está al día en Steam.`,
   collectionsOff: (name: string) => `«${name}» ya no se ve en Steam.`,
+  languageName: (l: string) =>
+    (({ Spanish: "Español", English: "Inglés", French: "Francés", German: "Alemán", Italian: "Italiano", Japanese: "Japonés", Portuguese: "Portugués", Dutch: "Neerlandés", Korean: "Coreano", Chinese: "Chino" }) as Record<string, string>)[l] ?? l,
+  regionName: (r: string) =>
+    (({ Spain: "España", Europe: "Europa", USA: "EE. UU.", Japan: "Japón", World: "Mundo", France: "Francia", Germany: "Alemania", Italy: "Italia" }) as Record<string, string>)[r] ?? r,
   collectionsKind: (kind: string) =>
     (({
       standard: "Colecciones",
@@ -261,6 +273,14 @@ const en: typeof es = {
   libraryDone: "Library up to date.",
   libraryDrop: "Remove the ones not installed",
   libraryDropped: "Only installed games are left.",
+  languageLabel: "Language of the games",
+  languageDesc: "Which version of each game new entries use, when RomM has several.",
+  languageMain: "RomM's main one",
+  versionLabel: "Version",
+  versionDesc: "The save moves to the new version if it has none; the other version's save stays kept.",
+  versionBringing: (n: number) => `Bringing the other version: ${n} %. Meanwhile the old one plays.`,
+  versionDone: "Version changed.",
+  versionNoAchievements: "This version has no RetroAchievements set.",
   collectionsLabel: "RomM collections",
   collectionsDesc: "Choose which RomM collections to see in Steam too.",
   collectionsOn: (n: number) => (n === 1 ? "1 RomM collection is shown in Steam." : `${n} RomM collections are shown in Steam.`),
@@ -271,6 +291,8 @@ const en: typeof es = {
   collectionsGames: (n: number) => (n === 1 ? "1 game" : `${n} games`),
   collectionsDone: (name: string) => `“${name}” is up to date in Steam.`,
   collectionsOff: (name: string) => `“${name}” is no longer shown in Steam.`,
+  languageName: (l: string) => l,
+  regionName: (r: string) => r,
   collectionsKind: (kind: string) =>
     (({
       standard: "Collections",

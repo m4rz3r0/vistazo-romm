@@ -31,6 +31,29 @@ const games = flag("vistazo-romm:games", () => {
 });
 const saves = flag("vistazo-romm:saves", () => stored("vistazo-romm:saves") === "1");
 
+// The language whose version of a game new entries start (as RomM names it: "Spanish"); empty
+// for the one RomM marks as the main version.
+let language = stored("vistazo-romm:language") ?? "";
+export const LANGUAGES = ["", "Spanish", "English"];
+export const preferredLanguage = () => language;
+export function setPreferredLanguage(value: string) {
+  if (language === value) return;
+  language = value;
+  safe(() => localStorage.setItem("vistazo-romm:language", value), undefined);
+  listeners.forEach((fn) => fn());
+}
+export function usePreferredLanguage(): string {
+  const [v, set] = useState(language);
+  useEffect(() => {
+    const fn = () => set(language);
+    listeners.add(fn);
+    return () => {
+      listeners.delete(fn);
+    };
+  }, []);
+  return v;
+}
+
 export const ownGames = games.get;
 export const setOwnGames = games.set;
 export const syncSaves = saves.get;

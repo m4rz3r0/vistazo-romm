@@ -807,6 +807,70 @@ def _stands_for_its_versions(rom):
     return _number(rom.get("id")) < min(_number(x.get("id")) for x in siblings)
 
 
+def _sibling_ids(rom):
+    return {_number(x.get("id")) for x in rom.get("sibling_roms") or [] if isinstance(x, dict) and _number(x.get("id")) > 0}
+
+
+def _languages(rom):
+    found = rom.get("languages")
+    return {_text(x).strip().lower() for x in found if isinstance(x, str)} if isinstance(found, list) else set()
+
+
+def _version_groups(every):
+    """The games of a listing, each as the sorted numbers of all its versions that are listed:
+    versions are linked by RomM's siblings, either way round."""
+    links = {n: set() for n in every}
+    for n, rom in every.items():
+        for m in _sibling_ids(rom):
+            if m in links:
+                links[n].add(m)
+                links[m].add(n)
+    seen, groups = set(), []
+    for start in sorted(every):
+        if start in seen:
+            continue
+        group, todo = set(), [start]
+        while todo:
+            n = todo.pop()
+            if n in group or n not in every:
+                continue
+            group.add(n)
+            todo += links[n]
+        seen |= group
+        groups.append(sorted(group))
+    return groups
+
+
+def _version_row(rom, current):
+    return {
+        "rom_id": _number(rom.get("id")),
+        "file": _text(rom.get("fs_name"))[:160],
+        "languages": [_text(x)[:40] for x in rom.get("languages") or [] if isinstance(x, str)][:8],
+        "regions": [_text(x)[:40] for x in rom.get("regions") or [] if isinstance(x, str)][:8],
+        "achievements": _number(rom.get("ra_id")) > 0,
+        "current": _number(rom.get("id")) == current,
+    }
+
+
+def _carry_save(old, new):
+    """The old version's save given to the new one when the new one has none yet; the old one
+    stays as it is. Returns "carried", "kept" (the new one has its own) or why not."""
+    old_path, kind = _save_file(old)
+    new_path, _ = _save_file(new)
+    if not old_path or not new_path or old_path == new_path:
+        return kind if not old_path else "same"
+    if os.path.lexists(new_path):
+        return "kept"
+    if not os.path.isfile(old_path) or os.path.islink(old_path):
+        return "none"
+    with open(old_path, "rb") as f:
+        raw = f.read(SAVE_MOST + 1)
+    if len(raw) > SAVE_MOST:
+        return "save"
+    _put_save(new_path, raw)
+    return "carried"
+
+
 def _already_there(rom):
     """The game's only file, when it is already whole in RetroDECK's folder for its console
     (another program brought it, or an earlier time). None otherwise."""
@@ -1607,15 +1671,17 @@ class Plugin:
         _keep("games", rom_id, detail)
         return {"ok": True, **detail}
 
-    async def romm_library(self):
+    async def romm_library(self, language=""):
         """Every game RomM has, to make each an entry in Steam: {"ok": True, "games": [{"rom_id",
-        "name", "platform", "system" ("" when its folder in RetroDECK is not known yet), "size"}]}.
-        Of a game kept in several versions only the main one is listed."""
+        "name", "platform", "system" ("" when its folder in RetroDECK is not known yet), "size",
+        "versions" (RomM's numbers of all its versions)}]}. Of a game kept in several versions one
+        is listed: the first in `language` (as RomM names languages: "Spanish"), else the main one."""
         server, key = _games_key()
         if not server:
             return {"ok": False, "why": key}
+        language = _text(language).strip().lower()[:40]
         loop = asyncio.get_running_loop()
-        games, offset = [], 0
+        every, offset = {}, 0
         for _ in range(LIBRARY_PAGES):
             path = ("/api/roms?limit=%d&offset=%d&order_by=name&order_dir=asc&with_char_index=false"
                     "&with_filter_values=false&with_rom_id_index=false&with_total=false" % (LIBRARY_PAGE, offset))
@@ -1628,16 +1694,20 @@ class Plugin:
             if status != 200 or not isinstance(items, list):
                 return {"ok": False, "why": "unreachable"}
             for rom in items:
-                if not isinstance(rom, dict) or _number(rom.get("id")) <= 0:
-                    continue
-                if not _stands_for_its_versions(rom):
-                    continue
-                d = _detail(rom)
-                games.append({"rom_id": d["rom_id"], "name": d["name"][:120], "platform": d["platform"][:60],
-                              "system": d["system"], "size": d["size"]})
+                if isinstance(rom, dict) and _number(rom.get("id")) > 0:
+                    every[_number(rom["id"])] = rom
             if len(items) < LIBRARY_PAGE:
                 break
             offset += LIBRARY_PAGE
+        games = []
+        for group in _version_groups(every):
+            roms = [every[i] for i in group]
+            pick = next((r for r in roms if language and language in _languages(r)), None)
+            pick = pick or next((r for r in roms if _stands_for_its_versions(r)), roms[0])
+            d = _detail(pick)
+            games.append({"rom_id": d["rom_id"], "name": d["name"][:120], "platform": d["platform"][:60],
+                          "system": d["system"], "size": d["size"], "versions": group})
+        games.sort(key=lambda g: (g["name"].lower(), g["rom_id"]))
         return {"ok": True, "games": games}
 
     async def romm_collections(self):
@@ -2049,6 +2119,167 @@ class Plugin:
             _discard(files, folders, system_dir, marks)
             _jobs.pop(appid, None)
             return {"ok": True, **_state(appid, game)}
+
+    async def game_versions(self, appid):
+        """The versions RomM keeps of this game (its languages and regions), the one this entry
+        starts marked "current": {"ok": True, "versions": [{"rom_id", "file", "languages",
+        "regions", "achievements", "current"}]}."""
+        appid = _number(appid)
+        server, key = _games_key()
+        if not server:
+            return {"ok": False, "why": key}
+        with _lock:
+            game = _read_games()["games"].get(str(appid))
+        if not game:
+            return {"ok": False, "why": "game"}
+        current = _number(game.get("rom_id"))
+
+        def ask():
+            rom, why = _rom(server, key, current)
+            if not rom:
+                return None, why
+            found = [rom]
+            for n in sorted(_sibling_ids(rom))[:12]:
+                other, why = _rom(server, key, n)
+                if other is None and why != "game":
+                    return None, why
+                if other is not None:
+                    found.append(other)
+            return found, None
+
+        roms, why = await asyncio.get_running_loop().run_in_executor(None, ask)
+        if roms is None:
+            return {"ok": False, "why": why}
+        return {"ok": True, "versions": sorted((_version_row(r, current) for r in roms), key=lambda v: v["rom_id"])}
+
+    async def game_switch(self, appid, rom_id):
+        """This entry starts another version of its game from now on. Not installed: at once.
+        Installed: the other version is brought first (the one there stays playable meanwhile),
+        then the save goes with it when it has none of its own (the old one stays as it is), and
+        the old file goes only if the add-on brought it. Answers as game_state, plus "options"
+        (what Steam's launch options must say) once the switch is done, and "pending" while the
+        new version is on its way."""
+        appid, rom_id = _number(appid), _number(rom_id)
+        server, key = _games_key()
+        if not server:
+            return {"ok": False, "why": key}
+        with _lock:
+            game = _read_games()["games"].get(str(appid))
+        if not game:
+            return {"ok": False, "why": "game"}
+        current = _number(game.get("rom_id"))
+        if rom_id == current:
+            return {"ok": True, "options": str(rom_id), **_state(appid, game)}
+        loop = asyncio.get_running_loop()
+        rom, why = await loop.run_in_executor(None, _rom, server, key, current)
+        if not rom:
+            return {"ok": False, "why": why}
+        if rom_id not in _sibling_ids(rom):
+            return {"ok": False, "why": "game"}
+        other, why = await loop.run_in_executor(None, _rom, server, key, rom_id)
+        if not other:
+            return {"ok": False, "why": why}
+        detail = _detail(other)
+        if detail["system"] != _text(game.get("system")):
+            return {"ok": False, "why": "game"}
+
+        def switched(kept, path, files, folders, marks):
+            """The record of the new version, the old one's files to take away, and what came of
+            its save. Called under the lock, with the record as it is now."""
+            old = dict(kept)
+            new = {**kept, "rom_id": rom_id, "platform": _text(other.get("platform_slug")), "size": detail["size"],
+                   "path": path, "installed": bool(path), "files": files, "folders": folders, "marks": marks, "saves": {}}
+            new.pop("switching", None)
+            save = "none"
+            if old.get("installed") and path:
+                try:
+                    save = _carry_save(old, new)
+                except _Stop as stop:
+                    return None, str(stop)
+            return new, save
+
+        with _lock:
+            data = _read_games()
+            kept = data["games"].get(str(appid))
+            job = _jobs.get(appid)
+            if not kept or _number(kept.get("rom_id")) != current:
+                return {"ok": False, "why": "game"}
+            if (job and job["state"] == "downloading") or appid in _saving:
+                return {"ok": False, "why": "busy"}
+            installed = bool(kept.get("installed") and os.path.isfile(_text(kept.get("path"))))
+            there = _already_there(other)
+            if not installed or there:
+                # Nothing to bring: the other version is not wanted on the disk yet, or it is already there.
+                new, save = switched(kept, there, [], [], {})
+                if new is None:
+                    return {"ok": False, "why": save}
+                gone = (kept.get("files") or [], kept.get("folders") or [], kept.get("marks")) if there else None
+                data["games"][str(appid)] = new
+                if not _write_games(data):
+                    return {"ok": False, "why": "disk"}
+                if gone and gone[0]:
+                    # The other version's file is never one of the old one's to take away.
+                    _discard([f for f in gone[0] if f != there], gone[1], os.path.join(_roms_root(), detail["system"]), gone[2])
+                _jobs.pop(appid, None)
+                return {"ok": True, "options": str(rom_id), "save": save, **_state(appid, new)}
+            kept["switching"] = rom_id
+            if not _write_games(data):
+                return {"ok": False, "why": "disk"}
+            job = {"state": "downloading", "done": 0, "total": detail["size"], "cancel": threading.Event(), "to": rom_id}
+            _jobs[appid] = job
+
+        def run():
+            def forget():
+                with _lock:
+                    data = _read_games()
+                    kept = data["games"].get(str(appid))
+                    if kept is not None and kept.pop("switching", None) is not None:
+                        _write_games(data)
+
+            try:
+                got = _download(server, key["token"], other, job, lambda part: _note_part(appid, part))
+            except _Stop as stop:
+                _note_part(appid, None)
+                forget()
+                job["state"] = str(stop)
+                return
+            except Exception as e:  # never leave a download hanging in "downloading"
+                decky.logger.error("Version not brought: %s", e)
+                _note_part(appid, None)
+                forget()
+                job["state"] = "error"
+                return
+            system_dir = os.path.join(_roms_root(), detail["system"])
+            with _lock:
+                data = _read_games()
+                kept = data["games"].get(str(appid))
+                if kept is None or _number(kept.get("rom_id")) != current or kept.get("switching") != rom_id:
+                    _discard(got["files"], got["folders"], system_dir)
+                    job["state"] = "cancelled"
+                    return
+                kept.pop("part", None)
+                marks = {f: _mark(f) for f in got["files"] if os.path.isfile(f)}
+                new, save = switched(kept, got["path"], got["files"], got["folders"], marks)
+                if new is None:
+                    kept.pop("switching", None)
+                    _write_games(data)
+                    _discard(got["files"], got["folders"], system_dir, marks)
+                    job["state"] = save
+                    return
+                old = (kept.get("files") or [], kept.get("folders") or [], kept.get("marks"))
+                data["games"][str(appid)] = new
+                if not _write_games(data):
+                    job["state"] = "disk"
+                    return
+                job["save"] = save
+                job["state"] = "installed"
+            mine = set(got["files"]) | {got["path"]}
+            if old[0]:
+                _discard([f for f in old[0] if f not in mine], [f for f in old[1] if f not in got["folders"]], system_dir, old[2])
+
+        loop.run_in_executor(None, run)
+        with _lock:
+            return {"ok": True, "pending": rom_id, **_state(appid, _read_games()["games"].get(str(appid)))}
 
     async def _main(self):
         _move_in()

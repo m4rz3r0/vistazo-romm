@@ -12,6 +12,10 @@ It does nothing without Vistazo installed.
   of it to Steam that this add-on downloads from RomM and starts in RetroDECK, with Vistazo's own page. Removing it
   takes away that entry and only the files the add-on brought. It works next to
   [Tender](https://github.com/danielcopper/romm-tender), which keeps the entries it made.
+- **Versions of a game.** When RomM keeps a game in several versions (languages, regions), *Language of the games*
+  picks which one new entries use, and the panel, with the game's page open, switches the one an entry starts. An
+  installed game gets the other version brought first (the old one plays meanwhile); its save goes with it when the
+  new version has none, the old save stays as it is, and the old file goes only if the add-on brought it.
 - **RomM's collections in Steam.** The settings list RomM's collections: the ones people make, smart ones, and the
   ones RomM makes itself (series, franchises, genres, companies, game modes). Each one turned on shows in Steam as
   "RomM: [name]" and brings the entries of its games that are missing; turning it off removes only that collection.
