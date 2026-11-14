@@ -1940,6 +1940,94 @@ def test_wii_saves():
     os.remove(rom_file)
 
 
+def test_emulators():
+    # Decky's own Python comes without Python's XML reader: the add-on must not need it.
+    blocked = {k: sys.modules.pop(k) for k in list(sys.modules) if k == "xml" or k.startswith("xml.")}
+    sys.modules["xml"] = None
+    try:
+        _test_emulators()
+    finally:
+        del sys.modules["xml"]
+        sys.modules.update(blocked)
+
+
+def _test_emulators():
+    main.FLATPAK_FILES = (os.path.join(".local", "share", "flatpak", "app", "net.retrodeck.retrodeck", "current", "active", "files"),)
+    es = os.path.join(HOME, main.FLATPAK_FILES[0], main.ES_SYSTEMS)
+    os.makedirs(os.path.dirname(es))
+    with open(es, "w") as f:
+        f.write("""<?xml version="1.0"?>
+<systemList>
+  <system><name>nds</name>
+    <command label="DeSmuME">%EMULATOR_RETROARCH% -L %CORE_RETROARCH%/desmume_libretro.so %ROM%</command>
+    <command label="melonDS DS">%EMULATOR_RETROARCH% -L %CORE_RETROARCH%/melondsds_libretro.so %ROM%</command>
+    <!-- <command label="Hidden">gone %ROM%</command> -->
+    <command label='Q &amp; A'>run &quot;%ROM%&quot; &#38; done</command>
+    <command label="Broken">a
+b</command>
+  </system>
+  <system><name>wii</name><command label="Dolphin (Standalone)">%EMULATOR_DOLPHIN% -b -e %ROM%</command></system>
+</systemList>""")
+    romm.roms[43] = rom(43, "Emu.nds")
+    target = os.path.join(ROMS, "nds", "Emu.nds")
+    with open(target, "wb") as f:
+        f.write(DATA)
+    run(plugin.game_take(4300, 43))
+    check("the console's emulators, in ES-DE's order", run(plugin.game_emulators(4300)),
+          {"ok": True, "emulators": ["DeSmuME", "melonDS DS", "Q & A"], "chosen": "", "saves": "melonDS DS"})
+    check("entities read back", main._emulators("nds")["Q & A"], 'run "%ROM%" & done')
+    check("not one of them", run(plugin.game_set_emulator(4300, "rm -rf /"))["why"], "emulator")
+    check("a broken one is not offered", run(plugin.game_set_emulator(4300, "Broken"))["why"], "emulator")
+    check("chosen", run(plugin.game_set_emulator(4300, "DeSmuME")), {"ok": True, "chosen": "DeSmuME"})
+    check("kept", run(plugin.game_emulators(4300))["chosen"], "DeSmuME")
+    with open(main.LAUNCH_FILE) as f:
+        check("the launcher is told RetroDECK's command", json.load(f)["43"],
+              {"path": target, "emulator": "%EMULATOR_RETROARCH% -L %CORE_RETROARCH%/desmume_libretro.so %ROM%"})
+
+    # The launcher hands it to RetroDECK as its emulator, the file still one argument of its own.
+    fake_bin = os.path.join(TMP, "bin-emu")
+    os.makedirs(fake_bin)
+    seen = os.path.join(TMP, "flatpak-emu.json")
+    with open(os.path.join(fake_bin, "flatpak"), "w") as f:
+        f.write("#!/usr/bin/python3\nimport json, sys\njson.dump(sys.argv[1:], open(%r, 'w'))\n" % seen)
+    os.chmod(os.path.join(fake_bin, "flatpak"), 0o755)
+    env = {"PATH": fake_bin + ":/usr/bin:/bin", "HOME": HOME}
+    done = subprocess.run([main.LAUNCHER, "43"], env=env, capture_output=True, text=True)
+    check("launched", done.returncode, 0)
+    with open(seen) as f:
+        check("with the emulator chosen", json.load(f), ["run", "net.retrodeck.retrodeck", "-e",
+              "%EMULATOR_RETROARCH% -L %CORE_RETROARCH%/desmume_libretro.so %ROM%", target])
+    # Saves are kept in step only with the emulator whose saves are known.
+    check("saves not with another emulator", run(plugin.save_sync(4300))["state"], "emulator")
+    check("back to RetroDECK's", run(plugin.game_set_emulator(4300, "")), {"ok": True, "chosen": ""})
+    with open(main.LAUNCH_FILE) as f:
+        check("plain again", json.load(f)["43"], target)
+    os.remove(seen)
+    subprocess.run([main.LAUNCHER, "43"], env=env, capture_output=True, text=True)
+    with open(seen) as f:
+        check("started as before", json.load(f), ["run", "net.retrodeck.retrodeck", target])
+    check("saves again", run(plugin.save_sync(4300))["state"] != "emulator", True)
+    # A list where the emulator is not a plain line is not believed.
+    with open(main.LAUNCH_FILE) as f:
+        table = json.load(f)
+    table["43"] = {"path": target, "emulator": "a\nb"}
+    main._write_private(main.LAUNCH_FILE, table)
+    check("odd emulator refused", subprocess.run([main.LAUNCHER, "43"], env=env, capture_output=True).returncode, 2)
+    check("a console ES-DE does not list", run(plugin.game_emulators(9999))["why"], "game")
+    # ES-DE's file unreadable: the list is still written, the game starts with RetroDECK's choice.
+    run(plugin.game_set_emulator(4300, "DeSmuME"))
+    os.chmod(es, 0)
+    main._es_cache.clear()
+    check("list still written", main._write_games(main._read_games()), True)
+    check("saves again while it starts with RetroDECK's own", run(plugin.save_sync(4300))["state"] != "emulator", True)
+    with open(main.LAUNCH_FILE) as f:
+        check("plain file without ES-DE's list", json.load(f)["43"], target)
+    os.chmod(es, 0o644)
+    main._es_cache.clear()
+    run(plugin.game_release(4300))
+    os.remove(target)
+
+
 try:
     test_server()
     test_move_in()
@@ -1952,6 +2040,7 @@ try:
     test_archive()
     test_saves()
     test_wii_saves()
+    test_emulators()
     test_versions()
     test_bios()
     test_adopt()

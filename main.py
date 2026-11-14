@@ -333,14 +333,82 @@ def _read_games():
 
 
 def _write_games(data):
-    """The games file and, from it, the launcher's list: game number in RomM -> its file."""
+    """The games file and, from it, the launcher's list: game number in RomM -> its file, or
+    its file and the emulator chosen for it (RetroDECK's own command for that emulator)."""
     if not _write_private(GAMES_FILE, data):
         return False
     table = {}
     for game in data["games"].values():
         if isinstance(game, dict) and game.get("installed") and isinstance(game.get("path"), str):
-            table[str(game.get("rom_id"))] = game["path"]
+            command = _emulators(_text(game.get("system"))).get(_text(game["emulator"])) if game.get("emulator") else None
+            table[str(game.get("rom_id"))] = {"path": game["path"], "emulator": command} if command else game["path"]
     return _write_private(LAUNCH_FILE, table)
+
+
+# ── Emulators ─────────────────────────────────────────────────────────────────────────────────
+# RetroDECK starts a game with the emulator ES-DE has for its console, unless told another one:
+# the choices are ES-DE's own list (its name for each, and the command RetroDECK runs).
+ES_SYSTEMS = os.path.join("retrodeck", "components", "es-de", "share", "es-de", "resources", "systems", "linux", "es_systems.xml")
+FLATPAK_FILES = ("/var/lib/flatpak/app/net.retrodeck.retrodeck/current/active/files",
+                 os.path.join(".local", "share", "flatpak", "app", "net.retrodeck.retrodeck", "current", "active", "files"))
+_es_cache = {}
+
+
+_XML_ENTITIES = {"amp": "&", "lt": "<", "gt": ">", "quot": '"', "apos": "'"}
+
+
+def _xml_text(text):
+    """Text or an attribute as written in ES-DE's file, with its entities read back.
+    (Decky's own Python comes without Python's XML reader.)"""
+    def one(m):
+        name = m.group(1)
+        if name.startswith("#"):
+            code = int(name[2:], 16) if name[1:2] in ("x", "X") else int(name[1:])
+            return chr(code) if 0 < code < 0x110000 else ""
+        return _XML_ENTITIES.get(name, m.group(0))
+    return re.sub(r"&(#[0-9]+|#[xX][0-9a-fA-F]+|[a-zA-Z]+);", one, text)
+
+
+def _es_systems(text):
+    """{console: {name: command}} from ES-DE's es_systems.xml."""
+    text = re.sub(r"<!--.*?-->", "", text, flags=re.S)
+    found = {}
+    for block in re.findall(r"<system\b[^>]*>(.*?)</system>", text, flags=re.S):
+        name = re.search(r"<name>([^<]*)</name>", block)
+        if not name:
+            continue
+        commands = {}
+        for attrs, body in re.findall(r"<command\b([^>]*)>([^<]*)</command>", block):
+            label = re.search(r"""\blabel\s*=\s*(?:"([^"]*)"|'([^']*)')""", attrs)
+            label = _xml_text((label.group(1) if label.group(1) is not None else label.group(2)) if label else "").strip()
+            body = _xml_text(body).strip()
+            if label and body and len(label) <= 80 and len(body) <= 1000 and "\0" not in body and "\n" not in body:
+                commands.setdefault(label, body)
+        found.setdefault(_xml_text(name.group(1)).strip(), commands)
+    return found
+
+
+def _emulators(system):
+    """ES-DE's emulators for one of RetroDECK's consoles: {name: command}, in its own order."""
+    if not system:
+        return {}
+    for base in FLATPAK_FILES:
+        path = os.path.join(_home(), base, ES_SYSTEMS) if not os.path.isabs(base) else os.path.join(base, ES_SYSTEMS)
+        try:
+            seen = os.stat(path).st_mtime_ns
+        except OSError:
+            continue
+        cached = _es_cache.get(path)
+        if not cached or cached[0] != seen:
+            try:
+                with open(path, encoding="utf-8") as f:
+                    found = _es_systems(f.read(4 << 20))
+            except (OSError, ValueError) as e:
+                decky.logger.warning("ES-DE's list not read: %s", e)
+                continue
+            cached = _es_cache[path] = (seen, found)
+        return dict(cached[1].get(system, {}))
+    return {}
 
 
 def _install_launcher():
@@ -1160,6 +1228,8 @@ SAVE_MOST = 64 * 1024 * 1024
 # knows that emulator by, the ending of what goes to RomM, RetroArch's own name for the core (its
 # folder when saves are sorted by core), and whether the save is a folder (sent as a zip of it).
 # Only what is in use; more as they are needed.
+# A game started with another emulator keeps its saves elsewhere: not kept in step then.
+SAVE_EMULATORS = {"nds": "melonDS DS", "wii": "Dolphin (Standalone)"}
 SAVE_KINDS = {
     "nds": ("retroarch-melondsds", ".srm", "melonDS DS", False),
     # Dolphin keeps each Wii game's save as a folder of the console's memory (its NAND).
@@ -1257,6 +1327,10 @@ def _save_file(game):
         return None, "unsupported"
     if not isinstance(rom, str) or not game.get("installed"):
         return None, "not-installed"
+    chosen, system = _text(game.get("emulator")), _text(game.get("system"))
+    # Only when the game really starts with another emulator (a choice RetroDECK no longer has falls back to its own).
+    if chosen and chosen != SAVE_EMULATORS.get(system) and chosen in _emulators(system):
+        return None, "emulator"
     if kind[3]:
         nand = _wii_nand()
         found = _disc_id(rom)
@@ -2773,6 +2847,40 @@ class Plugin:
             games = _read_games()["games"]
         return {a: _number(g["switching"].get("rom_id")) for a, g in games.items()
                 if isinstance(g, dict) and isinstance(g.get("switching"), dict)}
+
+    async def game_emulators(self, appid):
+        """The emulators RetroDECK has for this game's console: {"ok": True, "emulators": [name],
+        "chosen": name ("" when RetroDECK decides), "saves": the one whose saves are kept in step}."""
+        appid = _number(appid)
+        with _lock:
+            game = _read_games()["games"].get(str(appid))
+        if not isinstance(game, dict):
+            return {"ok": False, "why": "game"}
+        system = _text(game.get("system"))
+        names = list(_emulators(system))
+        if not names:
+            return {"ok": False, "why": "system"}
+        chosen = _text(game.get("emulator"))
+        return {"ok": True, "emulators": names, "chosen": chosen if chosen in names else "",
+                "saves": SAVE_EMULATORS.get(system, "")}
+
+    async def game_set_emulator(self, appid, name):
+        """Starts this game with that emulator from now on ("": as RetroDECK decides)."""
+        appid, name = _number(appid), _text(name)
+        with _lock:
+            data = _read_games()
+            game = data["games"].get(str(appid))
+            if not isinstance(game, dict):
+                return {"ok": False, "why": "game"}
+            if name and name not in _emulators(_text(game.get("system"))):
+                return {"ok": False, "why": "emulator"}
+            if name:
+                game["emulator"] = name
+            else:
+                game.pop("emulator", None)
+            if not _write_games(data):
+                return {"ok": False, "why": "disk"}
+        return {"ok": True, "chosen": name}
 
     async def game_gone(self):
         """The add-on's entries whose game was deleted in RomM: {"ok": True, "apps": [appid]}."""

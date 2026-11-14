@@ -262,6 +262,10 @@ export async function clearLostOwn(): Promise<string | null> {
   return why;
 }
 
+// The emulator a game starts with: RetroDECK's choice unless the player picks another.
+export const gameEmulators = callable<[appid: number], Reply & { emulators: string[]; chosen: string; saves: string }>("game_emulators");
+export const setEmulator = callable<[appid: number, name: string], Reply & { chosen?: string }>("game_set_emulator");
+
 // Entries whose game was deleted in RomM: shown in the settings, and taken away only when the
 // player says so (as removing an entry does: the files the add-on brought go, saves stay).
 const gone = callable<[], Reply & { apps: number[] }>("game_gone");

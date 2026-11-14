@@ -1,7 +1,7 @@
 import { ButtonItem, ConfirmModal, DropdownItem, PanelSection, PanelSectionRow, TextField, ToggleField, showModal } from "@decky/ui";
 import { useCallback, useEffect, useState } from "react";
 import { t } from "./i18n";
-import { GameState, RommCollection, Version, busyJob, cancelOwn, clearGone, goneOwn, pauseOwn, playState, gameVersions, running, switchVersion, TenderGame, addOwn, rommCollections, turnCollection, giveBackTender, takeOverTender, tenderGames, tenderOn, clearLostOwn, dropNotInstalled, gameState, loadOwned, lostOwn, onOwnChange, ownedApp, ownedRom, removeOwn, retryOwn, syncLibrary } from "./own";
+import { GameState, RommCollection, Version, busyJob, gameEmulators, setEmulator, cancelOwn, clearGone, goneOwn, pauseOwn, playState, gameVersions, running, switchVersion, TenderGame, addOwn, rommCollections, turnCollection, giveBackTender, takeOverTender, tenderGames, tenderOn, clearLostOwn, dropNotInstalled, gameState, loadOwned, lostOwn, onOwnChange, ownedApp, ownedRom, removeOwn, retryOwn, syncLibrary } from "./own";
 import { openGame } from "./page";
 import { PairAnswer, RommHealth, ServerAnswer, checkRomm, pairRomm, rommServer, setRommServer, unlinkRomm, useRomm } from "./romm";
 import { LANGUAGES, setOwnGames, setPreferredLanguage, setSyncSaves, useOwnGames, usePreferredLanguage, useSyncSaves } from "./settings";
@@ -560,6 +560,43 @@ function LostRow() {
   );
 }
 
+// The emulator the open game starts with: RetroDECK's choice, or one of ES-DE's for its console.
+// Saves are kept in step only with the one whose saves the add-on knows: said when another is picked.
+function EmulatorRow({ appid }: { appid: number }) {
+  const [info, setInfo] = useState<{ emulators: string[]; chosen: string; saves: string } | null>(null);
+  const [said, setSaid] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    gameEmulators(appid)
+      .then((e) => alive && setInfo(e?.ok ? e : null))
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, [appid]);
+  if (!info || info.emulators.length < 2) return null;
+  const noSaves = !!info.chosen && !!info.saves && info.chosen !== info.saves;
+  return (
+    <PanelSectionRow>
+      <DropdownItem
+        label={t.emulatorLabel}
+        description={said ?? (noSaves ? t.emulatorNoSaves(info.saves) : t.emulatorDesc)}
+        rgOptions={[{ data: "", label: t.emulatorDefault }, ...info.emulators.map((e) => ({ data: e, label: e }))]}
+        selectedOption={info.chosen}
+        onChange={(o) => {
+          if (running(appid)) return setSaid(t.ownWhy("running"));
+          setEmulator(appid, String(o.data))
+            .then((r) => {
+              setSaid(r?.ok ? null : t.ownWhy(r?.why ?? "error"));
+              if (r?.ok) setInfo({ ...info, chosen: String(o.data) });
+            })
+            .catch(() => setSaid(t.ownWhy("error")));
+        }}
+      />
+    </PanelSectionRow>
+  );
+}
+
 // Games of Vistazo's that were deleted in RomM: one row, only while there are any. RomM is asked
 // each time the settings open; removing the entries asks first, as it takes them out of Steam.
 function GoneRow() {
@@ -705,6 +742,7 @@ function OwnRow() {
         </ButtonItem>
       </PanelSectionRow>
       {!!appid && <VersionRow appid={appid} state={state} onDone={() => setTick((n) => n + 1)} />}
+      {!!appid && <EmulatorRow appid={appid} />}
       {!!appid && busyJob(state) && !state?.switching && (
         <PanelSectionRow>
           <ButtonItem layout="below" disabled={busy} onClick={() => act(() => pauseOwn(appid).then(() => null))}>

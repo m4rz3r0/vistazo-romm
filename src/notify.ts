@@ -15,7 +15,7 @@ function show(appid: number, body: string) {
 
 export function tellSave(appid: number, state: string | undefined) {
   const s = state ?? "unreachable";
-  if (["synced", "none", "busy", "unsupported", "not-installed", "game"].includes(s)) return;
+  if (["synced", "none", "busy", "unsupported", "not-installed", "game", "emulator"].includes(s)) return;
   const body =
     s === "sent" ? t.noteSent
     : s === "brought" ? t.noteBrought

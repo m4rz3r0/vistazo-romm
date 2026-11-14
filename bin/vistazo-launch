@@ -17,7 +17,7 @@ def fail(why):
 
 
 def game_path(table_file, rom_id):
-    """The file of that game, or None with the reason."""
+    """(the file of that game, the emulator chosen for it or None), or (None, the reason)."""
     if not (rom_id.isascii() and rom_id.isdigit() and len(rom_id) <= 12):
         return None, "not a game number"
     try:
@@ -29,23 +29,32 @@ def game_path(table_file, rom_id):
             table = json.load(f)
     except (OSError, ValueError):
         return None, "no game list"
-    path = table.get(rom_id) if isinstance(table, dict) else None
+    entry = table.get(rom_id) if isinstance(table, dict) else None
+    emulator = None
+    if isinstance(entry, dict):
+        # RetroDECK's own command for the emulator chosen for this game.
+        emulator = entry.get("emulator")
+        if not isinstance(emulator, str) or not emulator or "\0" in emulator or "\n" in emulator or len(emulator) > 1000:
+            return None, "the emulator chosen is not one RetroDECK has"
+        entry = entry.get("path")
+    path = entry
     if not isinstance(path, str) or not os.path.isabs(path) or "\0" in path:
         return None, "game not installed"
     if not os.path.isfile(path):
         return None, "the game's file is gone"
-    return path, None
+    return (path, emulator), None
 
 
 def main(argv):
     if len(argv) != 2:
         return fail("expected one game number")
     here = os.path.dirname(os.path.realpath(__file__))
-    path, why = game_path(os.path.join(here, "launch.json"), argv[1])
-    if path is None:
+    found, why = game_path(os.path.join(here, "launch.json"), argv[1])
+    if found is None:
         return fail(why)
+    path, emulator = found
     try:
-        os.execvp("flatpak", ["flatpak", "run", RETRODECK, path])
+        os.execvp("flatpak", ["flatpak", "run", RETRODECK] + (["-e", emulator] if emulator else []) + [path])
     except OSError as e:
         return fail("flatpak did not start: %s" % e)
 

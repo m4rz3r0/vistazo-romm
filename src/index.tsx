@@ -45,7 +45,7 @@ const saveWord = (state: string): AddonGame["save"] =>
 async function save(appid: number, anew: boolean): Promise<AddonGame["save"]> {
   if (!syncSaves()) return undefined;
   const known = await saveState(appid).catch(() => null);
-  if (!known || ["unsupported", "not-installed", "layout", "game"].includes(known.state)) return undefined;
+  if (!known || ["unsupported", "not-installed", "layout", "game", "emulator"].includes(known.state)) return undefined;
   const recent = Date.now() - (saveAsked.get(appid) ?? 0) < SAVE_GOOD;
   if (running(appid) || (!anew && recent && !known.changed && ["synced", "sent", "brought", "conflict"].includes(known.state)))
     return saveWord(known.state);
