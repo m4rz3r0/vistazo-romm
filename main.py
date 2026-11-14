@@ -871,9 +871,9 @@ def _tender_files(tender, system_dir, rom, taken=()):
     if (folder and os.path.basename(os.path.normpath(folder)) in names and os.path.isdir(folder)
             and not os.path.islink(folder) and _within(folder, system_dir)
             and not any(t == os.path.realpath(folder) or t.startswith(os.path.realpath(folder) + os.sep) for t in taken)):
-        for root, dirs, names in os.walk(folder):
+        for root, dirs, found in os.walk(folder):
             dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(root, d))]
-            for name in names:
+            for name in found:
                 f = os.path.join(root, name)
                 if os.path.isfile(f) and not os.path.islink(f) and _within(f, system_dir):
                     files.append(os.path.realpath(f))

@@ -548,6 +548,21 @@ def test_adopt():
     for f in (os.path.join(shelf, "Other.nds"), stranger, shared):
         os.remove(f)
 
+    # The game's folder being walked never changes which names count as the game's: a stray file
+    # named in the same row is still not taken.
+    gamel = os.path.join(nds, "GameL")
+    write(DATA, os.path.join(gamel, "GameL.nds"))
+    write(DATA, os.path.join(gamel, "Victim.nds"))
+    victim = os.path.join(nds, "Victim.nds")
+    write(DATA, victim)
+    romm.roms[113] = rom(113, "GameL.nds", fs_name="GameL")
+    tender_db([(113, 11300, "GameL", victim, gamel)])
+    run(plugin.game_adopt(11300, 113))
+    run(plugin.game_remove(11300))
+    check("a stray file in the row stays", os.path.isfile(victim), True)
+    run(plugin.game_release(11300))
+    os.remove(victim)
+
     # A database that cannot be read is no list, and no takeover.
     with open(tender_db([]), "wb") as f:
         f.write(b"not a database")
