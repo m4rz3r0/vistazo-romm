@@ -15,6 +15,9 @@ It does nothing without Vistazo installed.
 - **Save games** (DS for now, off until you turn it on). When a game played from its Vistazo entry closes, its save goes
   to RomM; a newer one on RomM is brought only when the Deck's has not changed, and only after keeping a copy of it.
   When both changed, nothing is touched until you choose on the game's page. A short notice says what happened.
+- **Pictures.** Each entry gets its cover from RomM and, when RomM keeps them, ScreenScraper's wide picture, logo
+  and wide capsule (in RomM's settings, add `fanart`, `logo` and `steamgrid` to the media it keeps, then rescan).
+  What RomM lacks is copied from Tender's entry of the same game while Tender is installed.
 - **BIOS files.** The game's page says whether the BIOS files RomM has for its console are on the Deck, and brings the
   missing ones, checked against RomM's sums.
 

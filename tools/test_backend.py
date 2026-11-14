@@ -522,6 +522,25 @@ def test_cover():
         check("cover %s" % name, run(plugin.game_cover(20)), {"ok": False, "why": "cover"})
         if name in ("outside the covers", "elsewhere", "another site", "none"):
             check("cover %s: only the game was asked for" % name, len(romm.calls) - before, 1)
+    # The other pictures: only RomM's own copies of ScreenScraper's media, and only those it has.
+    jpg = b"\xff\xd8\xff" + b"fanart"
+    romm.covers.update({"fanart.jpg": jpg, "logo.png": png})
+    romm.roms[20]["ss_metadata"] = {
+        "fanart_path": "roms/1/20/fanart/fanart.jpg", "logo_path": "/roms/1/20/logo/logo.png",
+        "steamgrid_path": "roms/1/20/../../../../api/users/me",
+        "fanart_url": "https://screenscraper.example/api2/mediaJeu.php?devid=x&devpassword=y",
+    }
+    before = len(romm.calls)
+    got = run(plugin.game_pictures(20, ["hero", "logo", "wide", "nonsense"]))
+    b64 = __import__("base64").b64decode
+    check("pictures RomM keeps", (got["ok"], b64(got["hero"]["data"]), got["hero"]["kind"], b64(got["logo"]["data"]), got["logo"]["kind"], "wide" in got),
+          (True, jpg, "jpg", png, "png", False))
+    check("pictures: only RomM's own folder asked", sorted(c[1].split("?")[0] for c in romm.calls[before:]),
+          ["/api/roms/20", "/assets/romm/resources/roms/1/20/fanart/fanart.jpg", "/assets/romm/resources/roms/1/20/logo/logo.png"])
+    check("only the kinds asked for", sorted(k for k in run(plugin.game_pictures(20, ["logo"])) if k != "ok"), ["logo"])
+    romm.roms[20].pop("ss_metadata")
+    check("no media kept", run(plugin.game_pictures(20)), {"ok": True})
+    check("unknown game", run(plugin.game_pictures(999))["ok"], False)
     got = run(plugin.game_launcher())
     check("launcher ready", (got["ok"], got["exe"], mode(main.LAUNCHER)), (True, main.LAUNCHER, 0o700))
     check("no games yet", run(plugin.game_list()), {})

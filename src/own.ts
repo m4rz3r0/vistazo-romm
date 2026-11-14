@@ -26,6 +26,8 @@ type Reply = { ok: boolean; why?: string };
 const list = callable<[], Record<string, number>>("game_list");
 const launcher = callable<[], Reply & { exe: string; start_dir: string }>("game_launcher");
 const cover = callable<[romId: number], Reply & { data: string; kind: string }>("game_cover");
+type Picture = { data: string; kind: string };
+const pictures = callable<[romId: number, kinds: string[]], Reply & { hero?: Picture; logo?: Picture; wide?: Picture }>("game_pictures");
 const take = callable<[appid: number, romId: number, exe: string, dir: string, options: string], GameState>("game_take");
 const release = callable<[appid: number], Reply>("game_release");
 const download = callable<[appid: number], GameState>("game_download");
@@ -117,6 +119,33 @@ async function picture(urls: string[]): Promise<[string, string] | null> {
   return null;
 }
 
+// The pictures RomM keeps for a game (its copies of ScreenScraper's wide picture, logo and wide
+// capsule), for the ones the entry lacks. RomM is asked at most once a day per game: a game
+// without them is not asked about at every page.
+const FROM_ROMM: [number, "hero" | "logo" | "wide", string][] = [
+  [1, "hero", "GetCustomHeroImageURLs"],
+  [2, "logo", "GetCustomLogoImageURLs"],
+  [3, "wide", "GetCustomLandscapeImageURLs"],
+];
+const ASKED = "vistazo-romm:pictures-asked";
+const DAY = 24 * 60 * 60 * 1000;
+async function rommArt(appid: number, romId: number) {
+  const mine = safe(() => appStore.GetAppOverviewByAppID(appid), null);
+  if (!mine || !romId) return;
+  const lacking = FROM_ROMM.filter(([, , method]) => !safe(() => (appStore[method](mine) as string[]).length, 0));
+  if (!lacking.length) return;
+  const asked: Record<string, number> = safe(() => JSON.parse(localStorage.getItem(ASKED) ?? "{}") ?? {}, {});
+  if (Date.now() - (asked[romId] ?? 0) < DAY) return;
+  const got = await pictures(romId, lacking.map(([, kind]) => kind)).catch(() => null);
+  if (!got?.ok) return;
+  asked[romId] = Date.now();
+  safe(() => localStorage.setItem(ASKED, JSON.stringify(asked)), undefined);
+  for (const [type, kind] of lacking) {
+    const p = got[kind];
+    if (p) safe(() => SteamClient.Apps.SetCustomArtworkForApp(appid, p.data, p.kind, type), undefined);
+  }
+}
+
 // Which Steam entry each of the add-on's came from, kept on the Deck: its pictures may arrive later.
 const FROM = "vistazo:own-from";
 const sources = (): Record<string, number> => safe(() => JSON.parse(localStorage.getItem(FROM) ?? "{}") ?? {}, {});
@@ -140,13 +169,18 @@ async function borrowArt(appid: number, from: number) {
   }
 }
 // Asked again when the entry's page shows: the other entry may have got its pictures since.
+// RomM's own first; what it lacks, from Tender's entry while there is one.
 export const refreshArt = (appid: number) => {
   const from = sources()[appid];
-  if (from) borrowArt(appid, from).catch(() => undefined);
+  rommArt(appid, ownedRom(appid))
+    .catch(() => undefined)
+    .then(() => (from ? borrowArt(appid, from) : undefined))
+    .catch(() => undefined);
 };
 
 // The new entry looks like the one it comes from; its cover comes from RomM.
 async function dress(appid: number, romId: number, from: number) {
+  await rommArt(appid, romId).catch(() => undefined);
   if (from) {
     setSource(appid, from);
     await borrowArt(appid, from);
@@ -305,7 +339,11 @@ export async function syncLibrary(step: (done: number, total: number) => void): 
       if (appid && g.platform) byPlatform.set(g.platform, [...(byPlatform.get(g.platform) ?? []), appid]);
     }
     await gather(byPlatform).catch((e) => console.warn("[Vistazo RomM] collections", e));
-    // Pictures from Tender's entries of the same games, for the ones that have none yet.
+    // Pictures from RomM first; then from Tender's entries of the same games, for what is still missing.
+    for (const g of games) {
+      const appid = ownedApp(g.rom_id);
+      if (appid) await rommArt(appid, g.rom_id).catch(() => undefined);
+    }
     const theirs = await tenderEntries();
     for (const g of games) {
       const [appid, from] = [ownedApp(g.rom_id), theirs.get(g.rom_id) ?? 0];

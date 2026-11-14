@@ -461,19 +461,39 @@ COVERS = "/assets/romm/resources/"  # where RomM serves its covers from
 COVER_KINDS = ((b"\x89PNG\r\n\x1a\n", "png"), (b"\xff\xd8\xff", "jpg"))
 
 
+# The other pictures of a Steam entry, from what RomM keeps of ScreenScraper's media (when RomM
+# is set to keep them): the wide picture behind the page, the logo over it and the wide capsule.
+# Only RomM's own copies are used, never ScreenScraper's addresses (they carry RomM's account).
+PICTURES = {"hero": ("fanart_path",), "logo": ("logo_path",), "wide": ("steamgrid_path",)}
+PICTURE_MAX = 8 * 1024 * 1024
+
+
 def _cover(server, key, rom):
-    """The game's cover as RomM keeps it: (bytes, "png" or "jpg"), or None. Only a picture of a
-    sensible size, from RomM's own folder of covers, is taken."""
-    path = _text(rom.get("path_cover_large")).split("?")[0]
+    """The game's cover as RomM keeps it: (bytes, "png" or "jpg"), or None."""
+    return _resource(server, key, _text(rom.get("path_cover_large")).split("?")[0], COVER_MAX)
+
+
+def _picture(server, key, rom, kind):
+    """One of the entry's other pictures as RomM keeps it: (bytes, "png" or "jpg"), or None."""
+    ss = rom.get("ss_metadata") if isinstance(rom.get("ss_metadata"), dict) else {}
+    for field in PICTURES[kind]:
+        path = _text(ss.get(field)).split("?")[0].lstrip("/")
+        if path:
+            return _resource(server, key, COVERS + path, PICTURE_MAX)
+    return None
+
+
+def _resource(server, key, path, most):
+    """A picture of a sensible size from RomM's own folder of resources, or None."""
     if not path.startswith(COVERS) or any(p in ("", ".", "..") for p in path[len(COVERS):].split("/")):
         return None
     req, _, ctx = _prepare(server, "GET", urllib.parse.quote(path), key["token"], accept="image/*")
     try:
         with _opener(ctx).open(req, timeout=TIMEOUT) as r:
-            raw = r.read(COVER_MAX + 1)
+            raw = r.read(most + 1)
     except (urllib.error.URLError, OSError, ValueError):
         return None
-    if len(raw) > COVER_MAX:
+    if len(raw) > most:
         return None
     kind = next((name for magic, name in COVER_KINDS if raw.startswith(magic)), None)
     return (raw, kind) if kind else None
@@ -1601,6 +1621,25 @@ class Plugin:
         if not cover:
             return {"ok": False, "why": "cover"}
         return {"ok": True, "data": base64.b64encode(cover[0]).decode("ascii"), "kind": cover[1]}
+
+    async def game_pictures(self, rom_id, kinds=("hero", "logo", "wide")):
+        """The entry's other pictures that RomM keeps: {"ok": True, kind: {"data", "kind"}}
+        for each of `kinds` RomM has; the ones it lacks are left out."""
+        rom_id = _number(rom_id)
+        server, key = _games_key()
+        if not server or rom_id <= 0:
+            return {"ok": False, "why": key if not server else "game"}
+        kinds = [k for k in (kinds if isinstance(kinds, (list, tuple)) else []) if k in PICTURES]
+        loop = asyncio.get_running_loop()
+        rom, why = await loop.run_in_executor(None, _rom, server, key, rom_id)
+        if not rom:
+            return {"ok": False, "why": why}
+        out = {"ok": True}
+        for kind in kinds:
+            got = await loop.run_in_executor(None, _picture, server, key, rom, kind)
+            if got:
+                out[kind] = {"data": base64.b64encode(got[0]).decode("ascii"), "kind": got[1]}
+        return out
 
     async def game_tidy(self):
         """Clears what this code left in Vistazo's own data folder when it lived there (its
