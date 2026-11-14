@@ -11,6 +11,7 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import ssl
 import stat
 import threading
@@ -821,6 +822,61 @@ def _already_there(rom):
     except OSError:
         pass
     return None
+
+
+# ── Taking over Tender's entries ───────────────────────────────────────────────────
+# Once Tender is off, its Steam entries (with their play time, pictures and collections) can be
+# the add-on's: each keeps its Steam number and is pointed at the add-on's launcher. Which entry
+# is which game, and which files Tender brought, are read from Tender's own database, read only.
+def _tender_db():
+    return os.path.join(_home(), ".local", "share", "romm-tender", "romm_sync.db")
+
+
+def _tender_games():
+    """{Steam number: {"rom_id", "name", "file", "dir"}} as Tender's database has them; {} when
+    there is none or it cannot be read."""
+    path = _tender_db()
+    if not os.path.isfile(path):
+        return {}
+    try:
+        con = sqlite3.connect("file:%s?mode=ro" % urllib.parse.quote(path), uri=True, timeout=2)
+        try:
+            rows = con.execute(
+                "SELECT r.rom_id, r.shortcut_app_id, r.name, i.file_path, i.rom_dir FROM roms r "
+                "LEFT JOIN rom_installs i ON i.rom_id = r.rom_id WHERE r.shortcut_app_id IS NOT NULL"
+            ).fetchall()
+        finally:
+            con.close()
+    except sqlite3.Error as e:
+        decky.logger.warning("Tender's database not read: %s", e)
+        return {}
+    out = {}
+    for rom_id, appid, name, file, folder in rows:
+        appid, rom_id = _number(appid), _number(rom_id)
+        if appid > 0 and rom_id > 0:
+            out[appid] = {"rom_id": rom_id, "name": _text(name), "file": _text(file), "dir": _text(folder)}
+    return out
+
+
+def _tender_files(tender, system_dir):
+    """What Tender brought for a game, inside RetroDECK's folder for its console: (the file
+    that starts it or None, the files, the folders). Nothing outside that folder, no links."""
+    path, files, folders = None, [], []
+    folder = tender.get("dir")
+    if folder and os.path.isdir(folder) and not os.path.islink(folder) and _within(folder, system_dir):
+        for root, dirs, names in os.walk(folder):
+            dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(root, d))]
+            for name in names:
+                f = os.path.join(root, name)
+                if os.path.isfile(f) and not os.path.islink(f) and _within(f, system_dir):
+                    files.append(os.path.realpath(f))
+        folders = [os.path.realpath(folder)]
+    file = tender.get("file")
+    if file and os.path.isfile(file) and not os.path.islink(file) and _within(file, system_dir):
+        path = os.path.realpath(file)
+        if path not in files:
+            files.append(path)
+    return path, files, folders
 
 
 def _installed_path(options, rom):
@@ -1702,6 +1758,81 @@ class Plugin:
             elif _number(game.get("rom_id")) != rom_id:
                 return {"ok": False, "why": "game"}
             return {"ok": True, "options": str(rom_id), **_state(appid, game)}
+
+    async def tender_games(self):
+        """Tender's entries as its database has them: [{"appid", "rom_id", "name", "mine"}],
+        "mine" when the add-on already starts that entry."""
+        games = _tender_games()
+        with _lock:
+            mine = _read_games()["games"]
+        return [{"appid": a, "rom_id": g["rom_id"], "name": g["name"], "mine": str(a) in mine} for a, g in sorted(games.items())]
+
+    async def game_adopt(self, appid, rom_id, exe="", start_dir="", options="", own=0):
+        """Takes over one of Tender's entries (Tender must be off: the frontend checks). `exe`,
+        `start_dir` and `options` are what it has now, kept to give it back (game_release). `own`
+        is the add-on's own entry of the same game, if any: its record moves here with its files
+        and the frontend removes it from Steam. The files Tender brought become the add-on's to
+        remove. Answers as game_take, plus "dropped" (the own entry merged in, or 0)."""
+        appid, rom_id, own = _number(appid), _number(rom_id), _number(own)
+        tender = _tender_games().get(appid)
+        if not tender or tender["rom_id"] != rom_id:
+            return {"ok": False, "why": "not-tender"}
+        server, key = _games_key()
+        if not server:
+            return {"ok": False, "why": key}
+        if not _install_launcher():
+            return {"ok": False, "why": "disk"}
+        rom, why = await asyncio.get_running_loop().run_in_executor(None, _rom, server, key, rom_id)
+        if not rom:
+            return {"ok": False, "why": why}
+        detail = _detail(rom)
+        with _lock:
+            data = _read_games()
+            games = data["games"]
+            if str(appid) in games:
+                if _number(games[str(appid)].get("rom_id")) != rom_id:
+                    return {"ok": False, "why": "game"}
+                return {"ok": True, "options": str(rom_id), "dropped": 0, **_state(appid, games[str(appid)])}
+            dup = games.get(str(own)) if own and own != appid else None
+            if dup is not None and _number(dup.get("rom_id")) != rom_id:
+                dup = None
+            for n in ([own] if dup is not None else []):
+                job = _jobs.get(n)
+                if job and job["state"] == "downloading":
+                    return {"ok": False, "why": "busy"}
+            t_path, t_files, t_folders = None, [], []
+            if detail["system"]:
+                t_path, t_files, t_folders = _tender_files(tender, os.path.join(_roms_root(), detail["system"]))
+            d = dup or {}
+            d_path = _text(d.get("path")) if d.get("installed") and os.path.isfile(_text(d.get("path"))) else None
+            path = d_path or t_path or _already_there(rom)
+            files = list(dict.fromkeys([f for f in (d.get("files") or []) if isinstance(f, str)] + t_files))
+            folders = list(dict.fromkeys([f for f in (d.get("folders") or []) if isinstance(f, str)] + t_folders))
+            marks = dict(d.get("marks") if isinstance(d.get("marks"), dict) else {})
+            for f in t_files:
+                if f not in marks:
+                    marks[f] = _mark(f)
+            games[str(appid)] = {
+                "rom_id": rom_id,
+                "platform": _text(rom.get("platform_slug")),
+                "system": detail["system"],
+                "path": path,
+                "size": detail["size"],
+                "installed": bool(path and os.path.isfile(path)),
+                "files": files,
+                "folders": folders,
+                "marks": marks,
+                "before": {"exe": str(exe or ""), "start_dir": str(start_dir or ""), "options": str(options or "")},
+                # The save is the same file, so what is known of it carries over.
+                "saves": d.get("saves") if isinstance(d.get("saves"), dict) else {},
+                "from": "tender",
+            }
+            if dup is not None:
+                games.pop(str(own), None)
+                _jobs.pop(own, None)
+            if not _write_games(data):
+                return {"ok": False, "why": "disk"}
+            return {"ok": True, "options": str(rom_id), "dropped": own if dup is not None else 0, **_state(appid, games[str(appid)])}
 
     async def game_release(self, appid):
         """Vistazo lets go of this game. Answers with what its shortcut had before, to put back:

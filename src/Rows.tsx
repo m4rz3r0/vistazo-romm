@@ -1,7 +1,7 @@
 import { ButtonItem, ConfirmModal, PanelSection, PanelSectionRow, TextField, ToggleField, showModal } from "@decky/ui";
 import { useCallback, useEffect, useState } from "react";
 import { t } from "./i18n";
-import { GameState, addOwn, clearLostOwn, dropNotInstalled, gameState, loadOwned, lostOwn, onOwnChange, ownedApp, ownedRom, removeOwn, retryOwn, syncLibrary } from "./own";
+import { GameState, TenderGame, addOwn, giveBackTender, takeOverTender, tenderGames, tenderOn, clearLostOwn, dropNotInstalled, gameState, loadOwned, lostOwn, onOwnChange, ownedApp, ownedRom, removeOwn, retryOwn, syncLibrary } from "./own";
 import { openGame } from "./page";
 import { PairAnswer, RommHealth, ServerAnswer, checkRomm, pairRomm, rommServer, setRommServer, unlinkRomm, useRomm } from "./romm";
 import { setOwnGames, setSyncSaves, useOwnGames, useSyncSaves } from "./settings";
@@ -26,6 +26,7 @@ export function Settings() {
           <ToggleField label={t.savesLabel} description={t.savesDesc} checked={saves} onChange={setSyncSaves} />
         </PanelSectionRow>
       )}
+      {games && <TenderRow />}
       {games && <LibraryRow />}
       {games && <OwnRow />}
       {games && <LostRow />}
@@ -36,6 +37,66 @@ export function Settings() {
 const useOwnChanges = (fn: () => void) => useEffect(() => onOwnChange(fn), [fn]);
 
 declare const DeckyPluginLoader: any;
+// Tender's entries: one row while Tender has any. With Tender on, it says to turn it off first;
+// off, it takes them over (or gives them back). Taking over asks first: it changes Steam entries.
+function TenderRow() {
+  const status = useRomm();
+  const [list, setList] = useState<TenderGame[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [said, setSaid] = useState<string | null>(null);
+  const read = useCallback(() => {
+    tenderGames()
+      .then(setList)
+      .catch(() => setList([]));
+  }, []);
+  useEffect(read, [read]);
+  useOwnChanges(read);
+  if (status !== "linked" || !list?.length) return null;
+  const on = tenderOn();
+  const theirs = list.filter((g) => !g.mine).length;
+  const mine = list.length - theirs;
+  const run = (what: () => Promise<string | null>, done: string) => {
+    setBusy(true);
+    setSaid(null);
+    what().then((why) => {
+      setSaid(why ? t.ownWhy(why) : done);
+      setBusy(false);
+      read();
+    });
+  };
+  const take = () =>
+    showModal(
+      <ConfirmModal
+        strTitle={t.tenderTitle}
+        strDescription={t.tenderConfirm(theirs)}
+        strOKButtonText={t.tenderTake}
+        onOK={() => run(() => takeOverTender((n, of) => setSaid(t.tenderStep(n, of))), t.tenderTaken)}
+      />,
+    );
+  return (
+    <>
+      <PanelSectionRow>
+        <ButtonItem
+          layout="below"
+          label={t.tenderLabel}
+          description={said ?? (on ? (mine ? t.tenderOnMine : t.tenderOn(theirs)) : theirs ? t.tenderOff(theirs) : t.tenderAllMine(mine))}
+          disabled={busy || on || !theirs}
+          onClick={take}
+        >
+          {t.tenderTake}
+        </ButtonItem>
+      </PanelSectionRow>
+      {mine > 0 && (
+        <PanelSectionRow>
+          <ButtonItem layout="below" disabled={busy} onClick={() => run(giveBackTender, t.tenderGiven)}>
+            {t.tenderGive}
+          </ButtonItem>
+        </PanelSectionRow>
+      )}
+    </>
+  );
+}
+
 // RomM's whole library as entries in Steam, in one collection per console; each game is then
 // installed from its own page. One row: bring it (again later, for what is new), and a way to
 // take away the entries of games that are not installed.

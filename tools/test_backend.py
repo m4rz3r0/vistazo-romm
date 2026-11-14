@@ -422,6 +422,106 @@ def test_server():
     check("an https address can skip the check", main._clean_url("https://romm.example:8443/sub/"), "https://romm.example:8443/sub")
 
 
+def tender_db(rows):
+    """Tender's database as far as the add-on reads it: (rom_id, appid, name, file, folder)."""
+    import sqlite3
+    folder = os.path.join(HOME, ".local", "share", "romm-tender")
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, "romm_sync.db")
+    if os.path.exists(path):
+        os.remove(path)
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE roms (rom_id INTEGER PRIMARY KEY, platform_slug TEXT, name TEXT NOT NULL, fs_name TEXT, shortcut_app_id INTEGER)")
+    con.execute("CREATE TABLE rom_installs (rom_id INTEGER PRIMARY KEY, file_path TEXT NOT NULL, rom_dir TEXT, platform_slug TEXT, installed_at TEXT)")
+    for rom_id, appid, name, file, folder in rows:
+        con.execute("INSERT INTO roms (rom_id, platform_slug, name, fs_name, shortcut_app_id) VALUES (?, 'nds', ?, ?, ?)", (rom_id, name, name, appid))
+        if file:
+            con.execute("INSERT INTO rom_installs (rom_id, file_path, rom_dir) VALUES (?, ?, ?)", (rom_id, file, folder))
+    con.commit()
+    con.close()
+    return path
+
+
+def test_adopt():
+    def write(data, path):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(data)
+
+    nds = os.path.join(ROMS, "nds")
+    os.makedirs(nds, exist_ok=True)
+    # Game 60: Tender brought one file. Game 61: Tender brought a folder of files. Game 62: only
+    # in Tender's list, not on the disk. Game 63: Tender's file outside RetroDECK's folder.
+    one = os.path.join(nds, "Sixty.nds")
+    write(DATA, one)
+    multi = os.path.join(nds, "Sixty-one")
+    write(b"a", os.path.join(multi, "disc1.bin"))
+    write(b"b", os.path.join(multi, "disc2.bin"))
+    write(b"cue", os.path.join(multi, "game.m3u"))
+    outside = os.path.join(TMP, "elsewhere.nds")
+    write(DATA, outside)
+    for n, name in ((60, "Sixty.nds"), (61, "Sixty-one"), (62, "Sixty-two.nds"), (63, "Sixty-three.nds")):
+        romm.roms[n] = rom(n, name)
+    tender_db([
+        (60, 6000, "Sixty", one, None),
+        (61, 6100, "Sixty-one", os.path.join(multi, "game.m3u"), multi),
+        (62, 6200, "Sixty-two", None, None),
+        (63, 6300, "Sixty-three", outside, None),
+        (64, None, "Unbound", None, None),
+    ])
+    listed = run(plugin.tender_games())
+    check("Tender's entries", [(g["appid"], g["rom_id"], g["mine"]) for g in listed],
+          [(6000, 60, False), (6100, 61, False), (6200, 62, False), (6300, 63, False)])
+
+    # Only Tender's own entry of that game, with that number.
+    check("not Tender's", run(plugin.game_adopt(7000, 60))["why"], "not-tender")
+    check("another game", run(plugin.game_adopt(6000, 61))["why"], "not-tender")
+
+    # The add-on's own entry of game 60 merges in; Tender's file becomes the add-on's.
+    run(plugin.game_take(6001, 60))
+    got = run(plugin.game_adopt(6000, 60, "/t/bin/rom-launcher", "/t/bin", "", 6001))
+    check("taken over", (got["ok"], got["options"], got["dropped"], got["installed"], got["removable"], got["exe"]),
+          (True, "60", 6001, True, True, main.LAUNCHER))
+    games = run(plugin.game_list())
+    check("own entry folded in", (games.get("6000"), "6001" in games), (60, False))
+    check("again: nothing changes", run(plugin.game_adopt(6000, 60))["dropped"], 0)
+    check("listed as mine", [g["mine"] for g in run(plugin.tender_games()) if g["appid"] == 6000], [True])
+
+    # A folder of files: all of them, and the folder, are the add-on's.
+    got = run(plugin.game_adopt(6100, 61))
+    check("folder taken over", (got["installed"], got["removable"]), (True, True))
+    removed = run(plugin.game_remove(6100))
+    check("folder removed", (removed["ok"], os.path.exists(multi)), (True, False))
+
+    # Nothing on the disk: taken over, not installed, downloadable as any other.
+    got = run(plugin.game_adopt(6200, 62))
+    check("nothing on disk", (got["ok"], got["installed"], got["removable"]), (True, False, False))
+
+    # Outside RetroDECK's folder: never the add-on's to remove.
+    got = run(plugin.game_adopt(6300, 63))
+    check("outside the folder", (got["ok"], got["removable"]), (True, False))
+    check("still there", os.path.isfile(outside), True)
+
+    # A file changed since the takeover is not removed.
+    with open(one, "ab") as f:
+        f.write(b"played")
+    run(plugin.game_remove(6000))
+    check("changed file kept", os.path.isfile(one), True)
+
+    # Given back: what the entry had before, so Tender can start it again.
+    back = run(plugin.game_release(6000))
+    check("given back", (back["exe"], back["start_dir"]), ("/t/bin/rom-launcher", "/t/bin"))
+    for appid in (6100, 6200, 6300):
+        run(plugin.game_release(appid))
+    os.remove(one)
+    os.remove(outside)
+
+    # A database that cannot be read is no list, and no takeover.
+    with open(tender_db([]), "wb") as f:
+        f.write(b"not a database")
+    check("unreadable database", (run(plugin.tender_games()), run(plugin.game_adopt(6000, 60))["why"]), ([], "not-tender"))
+
+
 def test_detail():
     romm.roms[5] = rom(5, "Game.nds")
     got = run(plugin.romm_game(5))
@@ -1194,6 +1294,7 @@ try:
     test_archive()
     test_saves()
     test_bios()
+    test_adopt()
     print("ok: %d checks" % checks)
 finally:
     server.shutdown()

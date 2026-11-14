@@ -1,5 +1,6 @@
 import { callable } from "@decky/api";
 import { safe } from "./safe";
+import { rommGame } from "./romm";
 
 // RomM games this add-on looks after itself (for those who turn it on). While Tender is installed
 // it keeps every game it has added to Steam for itself: it stops their launch to run its own
@@ -29,7 +30,15 @@ const cover = callable<[romId: number], Reply & { data: string; kind: string }>(
 type Picture = { data: string; kind: string };
 const pictures = callable<[romId: number, kinds: string[]], Reply & { hero?: Picture; logo?: Picture; wide?: Picture }>("game_pictures");
 const take = callable<[appid: number, romId: number, exe: string, dir: string, options: string], GameState>("game_take");
-const release = callable<[appid: number], Reply>("game_release");
+const release = callable<[appid: number], Reply & { exe?: string; start_dir?: string; options?: string }>("game_release");
+export interface TenderGame {
+  appid: number;
+  rom_id: number;
+  name: string;
+  mine: boolean;
+}
+export const tenderGames = callable<[], TenderGame[]>("tender_games");
+const adopt = callable<[appid: number, romId: number, exe: string, dir: string, options: string, own: number], GameState & { dropped?: number }>("game_adopt");
 const download = callable<[appid: number], GameState>("game_download");
 const cancel = callable<[appid: number], GameState>("game_cancel");
 const remove = callable<[appid: number], GameState>("game_remove");
@@ -408,4 +417,105 @@ export async function removeOwn(appid: number): Promise<string | null> {
   owned.delete(appid);
   changed();
   return null;
+}
+
+// ── Tender's entries ──────────────────────────────────────────────────────────────
+// While Tender is on it holds its entries (it stops their launches and writes them back), so they
+// can only be taken over once it is turned off or uninstalled.
+declare const DeckyPluginLoader: any;
+export const tenderOn = () => !!safe(() => (DeckyPluginLoader?.plugins ?? []).some((p: any) => p?.name === "Tender"), false);
+
+function details(appid: number): Promise<any> {
+  return new Promise((done) => {
+    let reg: any = null;
+    const timer = setTimeout(() => {
+      safe(() => reg?.unregister(), undefined);
+      done(null);
+    }, 3000);
+    reg = safe(
+      () =>
+        SteamClient.Apps.RegisterForAppDetails(appid, (d: any) => {
+          clearTimeout(timer);
+          safe(() => reg?.unregister(), undefined);
+          done(d);
+        }),
+      null,
+    );
+  });
+}
+
+// Each of Tender's entries becomes the add-on's under its own Steam number (play time, pictures and
+// collections stay): pointed at the add-on's launcher, with what it had kept to give it back. The
+// add-on's own entry of the same game is folded in and taken out of Steam; no game file is removed.
+export async function takeOverTender(step: (done: number, total: number) => void): Promise<string | null> {
+  if (tenderOn()) return "tender-on";
+  await loadOwned(true);
+  const l = await launcher().catch(() => null);
+  if (!l?.ok) return l?.why ?? "error";
+  const all = (await tenderGames().catch(() => [])).filter((g) => !g.mine);
+  let why: string | null = null;
+  let done = 0;
+  const byPlatform = new Map<string, number[]>();
+  for (const g of all) {
+    step(done++, all.length);
+    if (!safe(() => appStore.GetAppOverviewByAppID(g.appid), null)) continue; // gone from Steam
+    if (isRunning(g.appid)) {
+      why = "running";
+      continue;
+    }
+    const d = await details(g.appid);
+    if (!d) {
+      why = "steam";
+      continue;
+    }
+    const mine = ownedApp(g.rom_id);
+    const own = mine && mine !== g.appid && !isRunning(mine) ? mine : 0;
+    const got = await adopt(g.appid, g.rom_id, d.strShortcutExe ?? "", d.strShortcutStartDir ?? "", d.strLaunchOptions ?? "", own).catch(() => null);
+    if (!got?.ok || !got.options) {
+      why = got?.why ?? "error";
+      continue;
+    }
+    SteamClient.Apps.SetShortcutExe(g.appid, l.exe);
+    SteamClient.Apps.SetShortcutStartDir(g.appid, l.start_dir);
+    SteamClient.Apps.SetAppLaunchOptions(g.appid, got.options);
+    owned.set(g.appid, g.rom_id);
+    if (got.dropped) {
+      for (const type of [COVER, ...ART.map(([n]) => n)])
+        safe(() => SteamClient.Apps.ClearCustomArtworkForApp(got.dropped, type), undefined);
+      safe(() => SteamClient.Apps.RemoveShortcut(got.dropped), undefined);
+      setSource(got.dropped!, null);
+      owned.delete(got.dropped!);
+    }
+    const platform = (await rommGame(g.rom_id).catch(() => null))?.platform;
+    if (platform) byPlatform.set(platform, [...(byPlatform.get(platform) ?? []), g.appid]);
+  }
+  step(all.length, all.length);
+  await gather(byPlatform).catch((e) => console.warn("[Vistazo RomM] collections", e));
+  await tidyCollections().catch(() => undefined);
+  changed();
+  return why;
+}
+
+// Undoes it: each taken-over entry gets back what it had, for Tender to start it again.
+export async function giveBackTender(): Promise<string | null> {
+  await loadOwned(true);
+  const theirs = new Set((await tenderGames().catch(() => [])).filter((g) => g.mine).map((g) => g.appid));
+  let why: string | null = null;
+  for (const appid of theirs) {
+    if (isRunning(appid)) {
+      why = "running";
+      continue;
+    }
+    const back = await release(appid).catch(() => null);
+    if (!back?.ok) {
+      why = back?.why ?? "error";
+      continue;
+    }
+    if (back.exe) SteamClient.Apps.SetShortcutExe(appid, back.exe);
+    if (back.start_dir) SteamClient.Apps.SetShortcutStartDir(appid, back.start_dir);
+    SteamClient.Apps.SetAppLaunchOptions(appid, back.options ?? "");
+    owned.delete(appid);
+  }
+  changed();
+  return why;
 }
