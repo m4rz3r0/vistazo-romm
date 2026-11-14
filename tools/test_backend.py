@@ -1053,6 +1053,11 @@ def test_saves():
     add_save(6, b"other game", "Game.srm")
     check("not mine", (sync()["state"], read()), ("synced", newest))
 
+    # An older upload with no emulator noted is still this game's.
+    add_save(5, b"no emulator noted", "Game.srm", emulator=None)
+    check("no emulator noted", (sync()["state"], read()), ("brought", b"no emulator noted"))
+    newest = read()
+
     # No save here (a reinstall): RomM's comes, and there is nothing to copy first.
     os.remove(save)
     before = len(kept_copies())
