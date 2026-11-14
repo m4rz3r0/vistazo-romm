@@ -11,8 +11,12 @@ It does nothing without Vistazo installed.
 - **Games by Vistazo** (experimental, off until you turn it on). From a game's page, the settings add a second entry
   of it to Steam that this add-on downloads from RomM and starts in RetroDECK, with Vistazo's own page. Removing it
   takes away that entry and only the files the add-on brought. It works next to
-  [Tender](https://github.com/danielcopper/romm-tender), which keeps the entries it made. Save games are not synced
-  from that entry yet.
+  [Tender](https://github.com/danielcopper/romm-tender), which keeps the entries it made.
+- **Save games** (DS for now, off until you turn it on). When a game played from its Vistazo entry closes, its save goes
+  to RomM; a newer one on RomM is brought only when the Deck's has not changed, and only after keeping a copy of it.
+  When both changed, nothing is touched until you choose on the game's page. A short notice says what happened.
+- **BIOS files.** The game's page says whether the BIOS files RomM has for its console are on the Deck, and brings the
+  missing ones, checked against RomM's sums.
 
 ## Connecting to RomM
 

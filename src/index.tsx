@@ -24,6 +24,7 @@ import { safe } from "./safe";
 import { Settings } from "./Rows";
 import { tuckAway } from "./tuck";
 import { ownGames, syncSaves } from "./settings";
+import { tellBios, tellSave } from "./notify";
 
 // Vistazo RomM hands Vistazo what it knows of RomM games; Vistazo draws it. Without Vistazo
 // installed there is nothing to show them on, and the panel says so.
@@ -47,6 +48,8 @@ async function save(appid: number, anew: boolean): Promise<AddonGame["save"]> {
     return saveWord(known.state);
   const now = await saveSync(appid, "").catch(() => null);
   if (now && !["unreachable", "refused", "busy"].includes(now.state)) saveAsked.set(appid, Date.now());
+  // Opening a page says only what moved; failures there show on the page itself.
+  if (now && ["sent", "brought"].includes(now.state)) tellSave(appid, now.state);
   return saveWord(now?.state ?? "unreachable");
 }
 // The files the console needs: asked once per game while Steam runs, and again after bringing them.
@@ -70,6 +73,7 @@ function watchSaves(): () => void {
           saveSync(appid, "")
             .then((now) => {
               if (now && !["unreachable", "refused", "busy"].includes(now.state)) saveAsked.set(appid, Date.now());
+              tellSave(appid, now?.state);
               tellChanged();
             })
             .catch(() => undefined);
@@ -153,8 +157,9 @@ async function actions(appid: number): Promise<AddonAction[]> {
     const known = await saveState(appid).catch(() => null);
     if (known?.state === "conflict") {
       const settle = (choice: string) => async () => {
-        await saveSync(appid, choice).catch(() => null);
+        const now = await saveSync(appid, choice).catch(() => null);
         saveAsked.set(appid, Date.now());
+        tellSave(appid, now?.state);
         tellChanged();
       };
       out.push({ id: "save-romm", label: t.saveUseRomm, run: settle("romm") }, { id: "save-deck", label: t.saveUseDeck, run: settle("deck") });
@@ -165,7 +170,8 @@ async function actions(appid: number): Promise<AddonAction[]> {
       id: "bios",
       label: t.biosGet,
       run: async () => {
-        await biosFetch(appid).catch(() => null);
+        const after = await biosFetch(appid).catch(() => null);
+        tellBios(appid, biosKnown.get(appid), after);
         biosKnown.delete(appid);
         tellChanged();
       },
