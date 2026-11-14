@@ -705,6 +705,7 @@ def test_versions():
     check("not a version of it", run(plugin.game_switch(700, 62)), {"ok": False, "why": "game"})
     romm.roms[60]["sibling_roms"].append({"id": 63})
     check("not on the same console", run(plugin.game_switch(700, 63)), {"ok": False, "why": "game"})
+    check("nor listed", [v["rom_id"] for v in run(plugin.game_versions(700))["versions"]], [60, 61])
     romm.roms[60]["sibling_roms"].pop()
     done = run(plugin.game_switch(700, 61))
     check("switched at once", (done["ok"], done["options"], done["rom_id"], done["installed"], "pending" in done), (True, "61", 61, False, False))
@@ -719,7 +720,20 @@ def test_versions():
     started = run(plugin.game_switch(700, 61))
     check("on its way", (started["ok"], started["pending"], started["rom_id"]), (True, 61, 60))
     state = wait(700)
+    check("here, waiting", (state["job"]["state"], state["rom_id"], state["switching"], os.path.isfile(es), os.path.isfile(en)), ("ready", 60, 61, True, True))
+    with open(main.LAUNCH_FILE) as f:
+        check("still starts the old one", json.load(f), {"60": en})
+    check("listed as waiting", run(plugin.game_pending()), {"700": 61})
+    check("no second switch meanwhile", run(plugin.game_switch(700, 61)).get("why"), "busy")
+    # Still playing the old version when it arrived: its save is what goes, once the game closes.
+    with open(en_save, "wb") as f:
+        f.write(b"my team")
+    done = run(plugin.game_switch_finish(700))
+    check("finished", (done["ok"], done["options"], done["save"], done["rom_id"], "switching" in done), (True, "61", "carried", 61, False))
+    state = run(plugin.game_state(700))
     check("switched", (state["job"]["state"], state["rom_id"], state["installed"]), ("installed", 61, True))
+    check("nothing waiting", run(plugin.game_pending()), {})
+    check("finish twice", run(plugin.game_switch_finish(700))["why"], "game")
     check("files", (os.path.isfile(es), os.path.exists(en)), (True, False))
     with open(es_save, "rb") as f, open(en_save, "rb") as g:
         check("save carried, old one kept", (f.read(), g.read()), (b"my team", b"my team"))
@@ -733,7 +747,8 @@ def test_versions():
     with open(en_save, "wb") as f:
         f.write(b"english later")
     run(plugin.game_switch(700, 60))
-    check("back, installed", wait(700)["rom_id"], 60)
+    wait(700)
+    check("back, installed", run(plugin.game_switch_finish(700))["rom_id"], 60)
     with open(es_save, "rb") as f, open(en_save, "rb") as g:
         check("both saves as they were", (f.read(), g.read()), (b"played in Spanish", b"english later"))
     check("files back", (os.path.isfile(en), os.path.exists(es)), (True, False))
@@ -747,7 +762,8 @@ def test_versions():
     check("nothing downloaded", [c for c in romm.calls[calls:] if "/content/" in c[1]], [])
     check("old one ours: gone", os.path.exists(en), False)
     run(plugin.game_switch(700, 60))
-    check("back: brought", wait(700)["rom_id"], 60)
+    wait(700)
+    check("back: brought", run(plugin.game_switch_finish(700))["rom_id"], 60)
     check("the one not ours stays", os.path.isfile(es), True)
 
     # Cancelled on the way: nothing changes.
@@ -764,6 +780,25 @@ def test_versions():
     check("stopped: still the old one", (state["rom_id"], state["installed"], os.path.isfile(en), os.path.exists(es)), (60, True, True, False))
     check("nothing pending", "switching" in main._read_games()["games"]["700"], False)
     romm.content[61] = DATA
+
+    # Brought, then given up while waiting: the new file goes, the entry stays as it was.
+    run(plugin.game_switch(700, 61))
+    check("waiting again", wait(700)["job"]["state"], "ready")
+    state = run(plugin.game_cancel(700))
+    check("given up", (state["rom_id"], state.get("switching"), os.path.exists(es), os.path.isfile(en)), (60, None, False, True))
+    # The save cannot be written: nothing changes and what was brought goes.
+    run(plugin.game_switch(700, 61))
+    wait(700)
+    os.remove(es_save)  # so the save has to be written
+    real = main._put_save
+    main._put_save = lambda path, raw: (_ for _ in ()).throw(OSError("full"))
+    try:
+        failed = run(plugin.game_switch_finish(700))
+    finally:
+        main._put_save = real
+    state = run(plugin.game_state(700))
+    check("save not written: unchanged", (failed["ok"], failed["why"], state["rom_id"], state.get("switching"), os.path.exists(es), os.path.isfile(en)),
+          (False, "disk", 60, None, False, True))
 
     for path in (en, es, en_save, es_save):
         if os.path.exists(path):

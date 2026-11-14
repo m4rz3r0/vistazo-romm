@@ -537,6 +537,9 @@ def _state(appid, game):
     }
     if job:
         out["job"] = {"state": job["state"], "done": job["done"], "total": job["total"]}
+    sw = (game or {}).get("switching")
+    if isinstance(sw, dict):
+        out["switching"] = _number(sw.get("rom_id"))
     return out
 
 
@@ -869,6 +872,56 @@ def _carry_save(old, new):
         return "save"
     _put_save(new_path, raw)
     return "carried"
+
+
+def _drop_switch(game):
+    """Takes away a switch not done: the new version's files the add-on brought for it."""
+    sw = game.pop("switching", None)
+    if isinstance(sw, dict) and sw.get("files"):
+        _discard([f for f in sw["files"] if isinstance(f, str)], [f for f in sw.get("folders") or [] if isinstance(f, str)],
+                 os.path.join(_roms_root(), _text(game.get("system"))), sw.get("marks") if isinstance(sw.get("marks"), dict) else None)
+
+
+def _finish_switch(data, appid):
+    """Under the lock: the entry starts the version waiting in its "switching", with the save
+    carried over when the new version has none (the old one stays), and the old version's
+    files the add-on brought taken away. On any failure the entry stays as it was and what was
+    brought for the switch goes. Returns {"ok": True, "options", "save"} or {"ok": False, "why"}."""
+    old = data["games"][str(appid)]
+    sw = old.get("switching")
+    system_dir = os.path.join(_roms_root(), _text(old.get("system")))
+    rom_id = _number(sw.get("rom_id"))
+    path = sw.get("path") if isinstance(sw.get("path"), str) else None
+    files = [f for f in sw.get("files") or [] if isinstance(f, str)]
+    folders = [f for f in sw.get("folders") or [] if isinstance(f, str)]
+    marks = sw.get("marks") if isinstance(sw.get("marks"), dict) else {}
+    if path and not os.path.isfile(path):
+        _drop_switch(old)
+        _write_games(data)
+        return {"ok": False, "why": "error"}
+    new = {**old, "rom_id": rom_id, "platform": _text(sw.get("platform")), "size": _number(sw.get("size")),
+           "path": path, "installed": bool(path), "files": files, "folders": folders, "marks": marks, "saves": {}}
+    new.pop("switching", None)
+    new.pop("part", None)
+    save = "none"
+    try:
+        if old.get("installed") and path:
+            save = _carry_save(old, new)
+    except (_Stop, OSError) as e:
+        decky.logger.error("Save not carried: %s", e)
+        _drop_switch(old)
+        _write_games(data)
+        return {"ok": False, "why": "disk"}
+    gone = ([f for f in old.get("files") or [] if isinstance(f, str)], [f for f in old.get("folders") or [] if isinstance(f, str)],
+            old.get("marks") if isinstance(old.get("marks"), dict) else None)
+    data["games"][str(appid)] = new
+    if not _write_games(data):
+        data["games"][str(appid)] = old
+        return {"ok": False, "why": "disk"}
+    # The new version's files are never among the old one's to take away.
+    mine = set(files) | {path}
+    _discard([f for f in gone[0] if f not in mine], [f for f in gone[1] if f not in folders], system_dir, gone[2])
+    return {"ok": True, "options": str(rom_id), "save": save}
 
 
 def _already_there(rom):
@@ -2090,9 +2143,19 @@ class Plugin:
         return {"ok": True, **_state(appid, game)}
 
     async def game_cancel(self, appid):
-        job = _jobs.get(_number(appid))
+        appid = _number(appid)
+        job = _jobs.get(appid)
         if job and job["state"] == "downloading":
             job["cancel"].set()
+        with _lock:
+            data = _read_games()
+            game = data["games"].get(str(appid))
+            # A new version already here and waiting: taken away, the entry stays as it was.
+            if game and isinstance(game.get("switching"), dict):
+                _drop_switch(game)
+                _write_games(data)
+                if job and job["state"] == "ready":
+                    job["state"] = "cancelled"
         return await self.game_state(appid)
 
     async def game_remove(self, appid):
@@ -2106,6 +2169,9 @@ class Plugin:
             game = data["games"].get(str(appid))
             if not game:
                 return {"ok": False, "why": "game"}
+            if isinstance(game.get("switching"), dict):
+                _drop_switch(game)
+                _write_games(data)
             files = [f for f in game.get("files") or [] if isinstance(f, str)]
             if not files:
                 return {"ok": False, "why": "not-ours"}
@@ -2150,7 +2216,9 @@ class Plugin:
         roms, why = await asyncio.get_running_loop().run_in_executor(None, ask)
         if roms is None:
             return {"ok": False, "why": why}
-        return {"ok": True, "versions": sorted((_version_row(r, current) for r in roms), key=lambda v: v["rom_id"])}
+        system = _text(game.get("system"))
+        same = [r for r in roms if _number(r.get("id")) == current or _detail(r)["system"] == system]
+        return {"ok": True, "versions": sorted((_version_row(r, current) for r in same), key=lambda v: v["rom_id"])}
 
     async def game_switch(self, appid, rom_id):
         """This entry starts another version of its game from now on. Not installed: at once.
@@ -2183,103 +2251,91 @@ class Plugin:
         if detail["system"] != _text(game.get("system")):
             return {"ok": False, "why": "game"}
 
-        def switched(kept, path, files, folders, marks):
-            """The record of the new version, the old one's files to take away, and what came of
-            its save. Called under the lock, with the record as it is now."""
-            old = dict(kept)
-            new = {**kept, "rom_id": rom_id, "platform": _text(other.get("platform_slug")), "size": detail["size"],
-                   "path": path, "installed": bool(path), "files": files, "folders": folders, "marks": marks, "saves": {}}
-            new.pop("switching", None)
-            save = "none"
-            if old.get("installed") and path:
-                try:
-                    save = _carry_save(old, new)
-                except _Stop as stop:
-                    return None, str(stop)
-            return new, save
-
         with _lock:
             data = _read_games()
             kept = data["games"].get(str(appid))
             job = _jobs.get(appid)
             if not kept or _number(kept.get("rom_id")) != current:
                 return {"ok": False, "why": "game"}
-            if (job and job["state"] == "downloading") or appid in _saving:
+            if (job and job["state"] == "downloading") or appid in _saving or isinstance(kept.get("switching"), dict):
                 return {"ok": False, "why": "busy"}
             installed = bool(kept.get("installed") and os.path.isfile(_text(kept.get("path"))))
             there = _already_there(other)
+            target = {"rom_id": rom_id, "platform": _text(other.get("platform_slug")), "size": detail["size"]}
             if not installed or there:
-                # Nothing to bring: the other version is not wanted on the disk yet, or it is already there.
-                new, save = switched(kept, there, [], [], {})
-                if new is None:
-                    return {"ok": False, "why": save}
-                gone = (kept.get("files") or [], kept.get("folders") or [], kept.get("marks")) if there else None
-                data["games"][str(appid)] = new
-                if not _write_games(data):
-                    return {"ok": False, "why": "disk"}
-                if gone and gone[0]:
-                    # The other version's file is never one of the old one's to take away.
-                    _discard([f for f in gone[0] if f != there], gone[1], os.path.join(_roms_root(), detail["system"]), gone[2])
+                # Nothing to bring: the other version is not wanted on the disk yet, or it is already
+                # there. The frontend asks only while the game is not running.
+                kept["switching"] = {**target, "path": there, "files": [], "folders": [], "marks": {}}
+                out = _finish_switch(data, appid)
+                if not out.get("ok"):
+                    return out
                 _jobs.pop(appid, None)
-                return {"ok": True, "options": str(rom_id), "save": save, **_state(appid, new)}
-            kept["switching"] = rom_id
+                return {**out, **_state(appid, data["games"][str(appid)])}
+            kept.pop("switching", None)
             if not _write_games(data):
                 return {"ok": False, "why": "disk"}
             job = {"state": "downloading", "done": 0, "total": detail["size"], "cancel": threading.Event(), "to": rom_id}
             _jobs[appid] = job
 
         def run():
-            def forget():
-                with _lock:
-                    data = _read_games()
-                    kept = data["games"].get(str(appid))
-                    if kept is not None and kept.pop("switching", None) is not None:
-                        _write_games(data)
-
             try:
                 got = _download(server, key["token"], other, job, lambda part: _note_part(appid, part))
             except _Stop as stop:
                 _note_part(appid, None)
-                forget()
                 job["state"] = str(stop)
                 return
             except Exception as e:  # never leave a download hanging in "downloading"
                 decky.logger.error("Version not brought: %s", e)
                 _note_part(appid, None)
-                forget()
                 job["state"] = "error"
                 return
             system_dir = os.path.join(_roms_root(), detail["system"])
             with _lock:
                 data = _read_games()
                 kept = data["games"].get(str(appid))
-                if kept is None or _number(kept.get("rom_id")) != current or kept.get("switching") != rom_id:
+                if kept is None or _number(kept.get("rom_id")) != current:
                     _discard(got["files"], got["folders"], system_dir)
                     job["state"] = "cancelled"
                     return
                 kept.pop("part", None)
+                # Here, but not switched to yet: the game may still be running the old version,
+                # and its save is only final once it closes (game_switch_finish).
                 marks = {f: _mark(f) for f in got["files"] if os.path.isfile(f)}
-                new, save = switched(kept, got["path"], got["files"], got["folders"], marks)
-                if new is None:
-                    kept.pop("switching", None)
-                    _write_games(data)
-                    _discard(got["files"], got["folders"], system_dir, marks)
-                    job["state"] = save
-                    return
-                old = (kept.get("files") or [], kept.get("folders") or [], kept.get("marks"))
-                data["games"][str(appid)] = new
+                kept["switching"] = {**target, "path": got["path"], "files": got["files"], "folders": got["folders"], "marks": marks}
                 if not _write_games(data):
+                    _discard(got["files"], got["folders"], system_dir, marks)
                     job["state"] = "disk"
                     return
-                job["save"] = save
-                job["state"] = "installed"
-            mine = set(got["files"]) | {got["path"]}
-            if old[0]:
-                _discard([f for f in old[0] if f not in mine], [f for f in old[1] if f not in got["folders"]], system_dir, old[2])
+                job["state"] = "ready"
 
         loop.run_in_executor(None, run)
         with _lock:
             return {"ok": True, "pending": rom_id, **_state(appid, _read_games()["games"].get(str(appid)))}
+
+    async def game_switch_finish(self, appid):
+        """Ends a switch whose new version is here: the save goes along (when the new version has
+        none), the entry starts the new version, the old files the add-on brought go. The
+        frontend calls it only while the game is not running."""
+        appid = _number(appid)
+        with _lock:
+            data = _read_games()
+            game = data["games"].get(str(appid))
+            if not game or not isinstance(game.get("switching"), dict):
+                return {"ok": False, "why": "game"}
+            if appid in _saving:
+                return {"ok": False, "why": "busy"}
+            out = _finish_switch(data, appid)
+            job = _jobs.get(appid)
+            if job and job["state"] == "ready":
+                job["state"] = "installed" if out.get("ok") else out.get("why", "error")
+            return {**out, **_state(appid, data["games"].get(str(appid)))}
+
+    async def game_pending(self):
+        """The entries whose new version is here and waits to be switched to: {appid: rom_id}."""
+        with _lock:
+            games = _read_games()["games"]
+        return {a: _number(g["switching"].get("rom_id")) for a, g in games.items()
+                if isinstance(g, dict) and isinstance(g.get("switching"), dict)}
 
     async def _main(self):
         _move_in()

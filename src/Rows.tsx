@@ -204,9 +204,11 @@ function VersionRow({ appid, state, onDone }: { appid: number; state: GameState 
         description={
           bringing
             ? t.versionBringing(job?.total ? Math.floor((100 * job.done) / job.total) : 0)
+            : state?.switching
+              ? t.versionWaiting
             : (said ?? (mine && !mine.achievements ? `${t.versionNoAchievements} ${t.versionDesc}` : t.versionDesc))
         }
-        disabled={busy || job?.state === "downloading"}
+        disabled={busy || job?.state === "downloading" || !!state?.switching}
         rgOptions={list.map((v) => ({ data: v.rom_id, label: versionName(v, list) }))}
         selectedOption={current}
         onChange={(o) => change(Number(o.data))}

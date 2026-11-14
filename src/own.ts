@@ -22,6 +22,7 @@ export interface GameState {
   removable: boolean;
   options?: string;
   job?: { state: string; done: number; total: number };
+  switching?: number; // the version brought and waiting for the game to close
 }
 type Reply = { ok: boolean; why?: string };
 
@@ -79,6 +80,7 @@ export function loadOwned(again = false): Promise<void> {
       for (const [appid, romId] of Object.entries(all ?? {})) owned.set(Number(appid), Number(romId));
       changed();
       mend();
+      finishPending();
     })
     .catch((e) => {
       loaded = null;
@@ -459,27 +461,50 @@ export interface Version {
   current: boolean;
 }
 export const gameVersions = callable<[appid: number], Reply & { versions: Version[] }>("game_versions");
-const gameSwitch = callable<[appid: number, romId: number], GameState & { options?: string; pending?: number; save?: string }>("game_switch");
+type Switched = GameState & { options?: string; pending?: number; save?: string };
+const gameSwitch = callable<[appid: number, romId: number], Switched>("game_switch");
+const switchFinish = callable<[appid: number], Switched>("game_switch_finish");
+const pending = callable<[], Record<string, number>>("game_pending");
+
+function switchedTo(appid: number, romId: number) {
+  safe(() => SteamClient.Apps.SetAppLaunchOptions(appid, String(romId)), undefined);
+  owned.set(appid, romId);
+  changed();
+}
+
+// The switch ends only once the game is closed: what it saved while the other version was on
+// its way is what goes with it.
+async function finishWhenClosed(appid: number): Promise<string | null> {
+  while (isRunning(appid)) await wait(2000);
+  const done = await switchFinish(appid).catch(() => null);
+  if (!done?.ok) return done?.why ?? "error";
+  switchedTo(appid, done.rom_id);
+  return null;
+}
 
 export async function switchVersion(appid: number, romId: number): Promise<string | null> {
   if (isRunning(appid)) return "running";
   const got = await gameSwitch(appid, romId).catch(() => null);
   if (!got?.ok) return got?.why ?? "error";
-  if (got.pending) {
-    // The other version is on its way: the entry keeps starting the old one until it is here.
-    for (let tries = 0; ; tries++) {
-      await wait(1000);
-      const s = await gameState(appid).catch(() => null);
-      if (!s && tries > 60) return "unreachable";
-      if (!s || s.job?.state === "downloading") continue;
-      if (s.rom_id !== romId) return s.job?.state && s.job.state !== "installed" ? s.job.state : "error";
-      break;
-    }
+  if (!got.pending) {
+    switchedTo(appid, romId);
+    return null;
   }
-  safe(() => SteamClient.Apps.SetAppLaunchOptions(appid, String(romId)), undefined);
-  owned.set(appid, romId);
-  changed();
-  return null;
+  // The other version is on its way: the entry keeps starting the old one meanwhile.
+  for (let tries = 0; ; tries++) {
+    await wait(1000);
+    const s = await gameState(appid).catch(() => null);
+    if (!s && tries > 60) return "unreachable";
+    if (!s || s.job?.state === "downloading") continue;
+    if (s.switching !== romId) return s.job?.state && !["installed", "ready"].includes(s.job.state) ? s.job.state : "error";
+    return finishWhenClosed(appid);
+  }
+}
+
+// Switches left waiting (Steam or the add-on restarted meanwhile) end when the game is closed.
+async function finishPending() {
+  const waiting = await pending().catch(() => ({}) as Record<string, number>);
+  for (const appid of Object.keys(waiting).map(Number)) finishWhenClosed(appid).catch(() => undefined);
 }
 
 // Takes away the entries whose game is not on the Deck (nothing is deleted from the disk): what
