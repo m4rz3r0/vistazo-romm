@@ -285,21 +285,26 @@ declare const collectionStore: any;
 const library = callable<[], Reply & { games: { rom_id: number; name: string; platform: string; system: string; size: number }[] }>("romm_library");
 const COLLECTION = "RomM: "; // a collection's name: "RomM: Nintendo DS"
 
+const steamCollection = (name: string) =>
+  (collectionStore.userCollections as any[]).find((c) => String(c.displayName).toLowerCase() === name.toLowerCase());
+
+// Puts these entries in the Steam collection of that name, made when it is not there yet.
+async function putIn(name: string, appids: number[]) {
+  const overviews = appids.map((id) => safe(() => appStore.GetAppOverviewByAppID(id), null)).filter(Boolean);
+  if (!overviews.length) return;
+  const existing = steamCollection(name);
+  const collection = existing ?? collectionStore.NewUnsavedCollection(name, undefined, []);
+  const have = new Set<number>((collection.allApps ?? []).map((o: any) => Number(o.appid)));
+  const missing = overviews.filter((o: any) => !have.has(Number(o.appid)));
+  if (!existing || missing.length) {
+    collection.AsDragDropCollection().AddApps(missing);
+    await collection.Save();
+  }
+}
+
 async function gather(byPlatform: Map<string, number[]>) {
   if (typeof collectionStore === "undefined") return;
-  for (const [platform, appids] of byPlatform) {
-    const overviews = appids.map((id) => safe(() => appStore.GetAppOverviewByAppID(id), null)).filter(Boolean);
-    if (!overviews.length) continue;
-    const name = COLLECTION + platform;
-    const existing = (collectionStore.userCollections as any[]).find((c) => String(c.displayName).toLowerCase() === name.toLowerCase());
-    const collection = existing ?? collectionStore.NewUnsavedCollection(name, undefined, []);
-    const have = new Set<number>((collection.allApps ?? []).map((o: any) => Number(o.appid)));
-    const missing = overviews.filter((o: any) => !have.has(Number(o.appid)));
-    if (!existing || missing.length) {
-      collection.AsDragDropCollection().AddApps(missing);
-      await collection.Save();
-    }
-  }
+  for (const [platform, appids] of byPlatform) await putIn(COLLECTION + platform, appids);
 }
 
 // A collection of the add-on's left without games goes too (never one of another program's:
@@ -348,6 +353,7 @@ export async function syncLibrary(step: (done: number, total: number) => void): 
       if (appid && g.platform) byPlatform.set(g.platform, [...(byPlatform.get(g.platform) ?? []), appid]);
     }
     await gather(byPlatform).catch((e) => console.warn("[Vistazo RomM] collections", e));
+    await fillShown().catch((e) => console.warn("[Vistazo RomM] collections", e));
     // Pictures from RomM first; then from Tender's entries of the same games, for what is still missing.
     for (const g of games) {
       const appid = ownedApp(g.rom_id);
@@ -360,6 +366,70 @@ export async function syncLibrary(step: (done: number, total: number) => void): 
       if (!sources()[appid]) setSource(appid, from);
       await borrowArt(appid, sources()[appid]).catch(() => undefined);
     }
+    changed();
+    return why;
+  } finally {
+    syncing = false;
+  }
+}
+
+// RomM's collections shown in Steam, one Steam collection each: "RomM: [Pokémon]" (the brackets keep
+// them apart from the consoles'). Showing one brings the entries of its games that are missing, as
+// bringing the library does; no longer showing it takes away only Steam's collection.
+export interface RommCollection {
+  key: string;
+  kind: "standard" | "smart" | "virtual";
+  sort: string;
+  name: string;
+  roms: number[];
+  on: boolean;
+}
+export const rommCollections = callable<[], Reply & { collections: RommCollection[] }>("romm_collections");
+const showCollection = callable<[key: string, on: boolean], Reply>("romm_collection_set");
+const shownName = (c: RommCollection) => `${COLLECTION}[${c.name}]`;
+
+// Fills the shown collections with the entries already there (after the library was brought).
+async function fillShown() {
+  if (typeof collectionStore === "undefined") return;
+  const all = await rommCollections().catch(() => null);
+  if (!all?.ok) return;
+  await loadOwned();
+  for (const c of all.collections.filter((c) => c.on))
+    await putIn(shownName(c), c.roms.map(ownedApp).filter(Boolean));
+}
+
+export async function turnCollection(c: RommCollection, on: boolean, step: (done: number, total: number) => void): Promise<string | null> {
+  if (syncing) return "busy";
+  const kept = await showCollection(c.key, on).catch(() => null);
+  if (!kept?.ok) return kept?.why ?? "error";
+  if (typeof collectionStore === "undefined") return null;
+  if (!on) {
+    const existing = steamCollection(shownName(c));
+    if (existing) await existing.Delete();
+    return null;
+  }
+  syncing = true;
+  try {
+    const lib = await library().catch(() => null);
+    if (!lib?.ok) return lib?.why ?? "error";
+    await loadOwned(true);
+    const wanted = new Set(c.roms);
+    // As with the library: only games whose console's folder in RetroDECK is known.
+    const games = lib.games.filter((g) => g.system && wanted.has(g.rom_id));
+    let done = 0;
+    let why: string | null = null;
+    for (const g of games) {
+      if (!ownedApp(g.rom_id)) why = (await addOwn(g.rom_id, g.name, 0, false)) ?? why;
+      step(++done, games.length);
+    }
+    await putIn(shownName(c), games.map((g) => ownedApp(g.rom_id)).filter(Boolean));
+    // The new entries go into their console's collection too.
+    const byPlatform = new Map<string, number[]>();
+    for (const g of games) {
+      const appid = ownedApp(g.rom_id);
+      if (appid && g.platform) byPlatform.set(g.platform, [...(byPlatform.get(g.platform) ?? []), appid]);
+    }
+    await gather(byPlatform).catch((e) => console.warn("[Vistazo RomM] collections", e));
     changed();
     return why;
   } finally {

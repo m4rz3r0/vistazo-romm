@@ -1333,6 +1333,83 @@ def _probe(server):
     return "ok" if isinstance(body, dict) and isinstance(body.get("SYSTEM"), dict) else "not-romm"
 
 
+# RomM's collections, each of which the player may show in Steam as a collection of its own. RomM
+# has three sorts: the ones people make, smart ones (a saved search) and the ones it makes itself
+# from what it knows of each game (series, franchise, genre, company, way of playing). Which are
+# shown is kept here, by sort and number: "standard:3", "smart:1", "virtual:<RomM's id>".
+COLLECTIONS_FILE = os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "collections.json")
+VIRTUAL_KINDS = ("collection", "franchise", "genre", "company", "mode")
+COLLECTIONS_MAX = 500  # collections listed or kept at most
+COLLECTION_ROMS_MAX = 20000
+
+
+def _shown_collections():
+    try:
+        with open(COLLECTIONS_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        keys = data.get("on") if isinstance(data, dict) else None
+        if isinstance(keys, list):
+            return [k for k in keys if _collection_key_ok(k)][:COLLECTIONS_MAX]
+    except (OSError, ValueError):
+        pass
+    return []
+
+
+def _collection_key_ok(key):
+    if not isinstance(key, str) or len(key) > 200 or any(c.isspace() and c != " " for c in key):
+        return False
+    kind, _, cid = key.partition(":")
+    if kind in ("standard", "smart"):
+        return cid.isdigit() and int(cid) > 0
+    return kind == "virtual" and bool(cid.strip())
+
+
+def _collection_row(kind, c, sort=""):
+    """What the settings need of one of RomM's collections, or None for anything unexpected."""
+    if not isinstance(c, dict):
+        return None
+    # RomM numbers the ones people make and the smart ones; its own sorts carry a text id.
+    cid = c.get("id")
+    whole = isinstance(cid, int) and not isinstance(cid, bool)
+    cid = (cid if isinstance(cid, str) else "") if kind == "virtual" else (str(cid) if whole else "")
+    key = "%s:%s" % (kind, cid)
+    if not cid or not _collection_key_ok(key):
+        return None
+    name = " ".join(_text(c.get("name")).split())[:80]
+    roms = c.get("rom_ids")
+    roms = sorted({r for r in roms if isinstance(r, int) and not isinstance(r, bool) and r > 0}) if isinstance(roms, list) else []
+    if not name:
+        return None
+    return {"key": key, "kind": kind, "sort": sort, "name": name, "roms": roms[:COLLECTION_ROMS_MAX]}
+
+
+def _collections(server, key):
+    """RomM's collections as rows, or (None, why). The ones people make must come; smart and
+    RomM's own sorts are added when they come, so one that fails leaves the rest."""
+    token = key["token"]
+    status, reply = _request(server, "GET", "/api/collections", token)
+    if status == 401:
+        _forget_key()
+    if status in (401, 403):
+        return None, "refused"
+    if status != 200 or not isinstance(reply, list):
+        return None, "unreachable"
+    rows = [_collection_row("standard", c) for c in reply]
+    status, reply = _request(server, "GET", "/api/collections/smart", token)
+    if status == 200 and isinstance(reply, list):
+        rows += [_collection_row("smart", c) for c in reply]
+    for sort in VIRTUAL_KINDS:
+        status, reply = _request(server, "GET", "/api/collections/virtual?type=" + sort, token)
+        if status == 200 and isinstance(reply, list):
+            rows += [_collection_row("virtual", c, sort) for c in reply]
+    seen, out = set(), []
+    for r in rows:
+        if r and r["key"] not in seen:
+            seen.add(r["key"])
+            out.append(r)
+    return out[:COLLECTIONS_MAX], None
+
+
 class Plugin:
     async def romm_status(self):
         """"linked" (a key for RomM's address that may look after games), "limited" (the same,
@@ -1562,6 +1639,34 @@ class Plugin:
                 break
             offset += LIBRARY_PAGE
         return {"ok": True, "games": games}
+
+    async def romm_collections(self):
+        """RomM's collections, each with its games' RomM numbers and whether it is shown in
+        Steam: {"ok": True, "collections": [{"key", "kind", "sort", "name", "roms", "on"}]}."""
+        server, key = _games_key()
+        if not server:
+            return {"ok": False, "why": key}
+        rows, why = await asyncio.get_running_loop().run_in_executor(None, _collections, server, key)
+        if rows is None:
+            return {"ok": False, "why": why}
+        with _lock:
+            shown = set(_shown_collections())
+        return {"ok": True, "collections": [{**r, "on": r["key"] in shown} for r in rows]}
+
+    async def romm_collection_set(self, key, on):
+        """Shows one of RomM's collections in Steam, or stops showing it. Only what is kept here
+        changes; the entries and Steam's collection are the front end's."""
+        if not _collection_key_ok(key):
+            return {"ok": False, "why": "collection"}
+        with _lock:
+            shown = [k for k in _shown_collections() if k != key]
+            if on is True:
+                if len(shown) >= COLLECTIONS_MAX:
+                    return {"ok": False, "why": "collection"}
+                shown.append(key)
+            if not _write_private(COLLECTIONS_FILE, {"on": shown}):
+                return {"ok": False, "why": "error"}
+        return {"ok": True}
 
     async def bios_state(self, appid):
         """Whether the BIOS files RomM has for this game's console are on the Deck."""

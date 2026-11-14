@@ -12,6 +12,10 @@ It does nothing without Vistazo installed.
   of it to Steam that this add-on downloads from RomM and starts in RetroDECK, with Vistazo's own page. Removing it
   takes away that entry and only the files the add-on brought. It works next to
   [Tender](https://github.com/danielcopper/romm-tender), which keeps the entries it made.
+- **RomM's collections in Steam.** The settings list RomM's collections: the ones people make, smart ones, and the
+  ones RomM makes itself (series, franchises, genres, companies, game modes). Each one turned on shows in Steam as
+  "RomM: [name]" and brings the entries of its games that are missing; turning it off removes only that collection.
+  Bringing the library again keeps the ones turned on up to date.
 - **Taking over from Tender.** Once Tender is turned off in Decky, the add-on's settings can keep Tender's entries:
   they keep their play time, pictures and collections, the games Tender downloaded can be removed from their page, and
   the add-on's own second entries of the same games go away. It can be given back while Tender is still installed.

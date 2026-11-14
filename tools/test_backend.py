@@ -65,6 +65,8 @@ class RomM:
         self.short_save = False  # send less of a save than announced
         self.firmware = []  # RomM's BIOS files: dicts with "data"
         self.meanwhile = None  # called while a save is on its way
+        self.collections = {"standard": [], "smart": [], "virtual": {}}  # virtual: sort -> list
+        self.collections_down = set()  # "standard", "smart" or a sort: answered with 500
 
 
 romm = RomM()
@@ -203,6 +205,17 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(f["data"])
             return
+        if parts[:2] == ["api", "collections"] and method == "GET":
+            from urllib.parse import parse_qs, urlsplit
+            what = parts[2] if len(parts) > 2 else "standard"
+            if what == "virtual":
+                what = parse_qs(urlsplit(self.path).query)["type"][0]
+                found = romm.collections["virtual"].get(what, [])
+            else:
+                found = romm.collections.get(what)
+            if what in romm.collections_down or found is None:
+                return self.reply(500)
+            return self.reply(200, found)
         if parts == ["api", "roms"]:
             from urllib.parse import parse_qs, urlsplit
             q = parse_qs(urlsplit(self.path).query)
@@ -654,6 +667,51 @@ def test_detail():
     check("moved: nothing sent", len(romm.calls), before)
     main._write_private(main.SERVER_FILE, {"url": URL, "insecure": False})
     check("back again", run(plugin.romm_status()), "linked")
+
+
+def test_collections():
+    g = "eyJuYW1lIjogIlBsYXRmb3JtIn0="
+    romm.collections = {
+        "standard": [{"id": 3, "name": "  My   picks ", "rom_ids": [5, 30, 5, -1, "x", True]},
+                     {"id": "4", "name": "id as text"}, {"id": 6, "name": ""}, "junk"],
+        "smart": [{"id": 1, "name": "Unplayed", "rom_ids": [31]}],
+        "virtual": {"genre": [{"id": g, "name": "Platform", "rom_ids": [5]}],
+                    "franchise": [{"id": "bad\nid", "name": "Line"}, {"id": 9, "name": "number"}]},
+    }
+    got = run(plugin.romm_collections())
+    check("collections ok", got["ok"], True)
+    check("rows", [(c["key"], c["kind"], c["sort"], c["name"], c["roms"], c["on"]) for c in got["collections"]], [
+        ("standard:3", "standard", "", "My picks", [5, 30], False),
+        ("smart:1", "smart", "", "Unplayed", [31], False),
+        ("virtual:" + g, "virtual", "genre", "Platform", [5], False)])
+    check("asked each sort", sum(1 for c in romm.calls if c[1].startswith("/api/collections/virtual?type=")) >= 5, True)
+
+    # Shown or not, kept on the Deck for this user only; a key that is not one of RomM's sorts is refused.
+    check("shown", run(plugin.romm_collection_set("virtual:" + g, True)), {"ok": True})
+    check("shown twice: once", run(plugin.romm_collection_set("virtual:" + g, True)), {"ok": True})
+    check("another", run(plugin.romm_collection_set("standard:3", True)), {"ok": True})
+    check("file private", mode(main.COLLECTIONS_FILE), 0o600)
+    check("kept once", main._shown_collections(), ["virtual:" + g, "standard:3"])
+    on = {c["key"]: c["on"] for c in run(plugin.romm_collections())["collections"]}
+    check("on as kept", (on["standard:3"], on["smart:1"], on["virtual:" + g]), (True, False, True))
+    check("hidden", run(plugin.romm_collection_set("standard:3", False)), {"ok": True})
+    check("only that one", main._shown_collections(), ["virtual:" + g])
+    for bad in ("standard:x", "smart:0", "virtual:", "virtual: \n", "other:1", 3, None, "standard:1" + "1" * 300):
+        check("refused key %r" % (bad,), run(plugin.romm_collection_set(bad, True)), {"ok": False, "why": "collection"})
+    check("not a real true", (run(plugin.romm_collection_set("smart:1", "yes")), "smart:1" in main._shown_collections()), ({"ok": True}, False))
+
+    # One sort failing leaves the rest; the ones people make must come.
+    romm.collections_down = {"smart", "genre"}
+    got = run(plugin.romm_collections())
+    check("partial", [c["key"] for c in got["collections"]], ["standard:3"])
+    romm.collections_down = {"standard"}
+    check("main list down", run(plugin.romm_collections()), {"ok": False, "why": "unreachable"})
+    romm.collections_down = set()
+    with open(main.COLLECTIONS_FILE, "w") as f:
+        f.write("{not json")
+    check("unreadable file: none shown", any(c["on"] for c in run(plugin.romm_collections())["collections"]), False)
+    os.remove(main.COLLECTIONS_FILE)
+    romm.collections = {"standard": [], "smart": [], "virtual": {}}
 
 
 def test_cover():
@@ -1335,6 +1393,7 @@ try:
     test_move_in()
     test_key()
     test_detail()
+    test_collections()
     test_cover()
     test_launcher()
     test_download()

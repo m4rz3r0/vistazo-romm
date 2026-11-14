@@ -1,7 +1,7 @@
 import { ButtonItem, ConfirmModal, PanelSection, PanelSectionRow, TextField, ToggleField, showModal } from "@decky/ui";
 import { useCallback, useEffect, useState } from "react";
 import { t } from "./i18n";
-import { GameState, TenderGame, addOwn, giveBackTender, takeOverTender, tenderGames, tenderOn, clearLostOwn, dropNotInstalled, gameState, loadOwned, lostOwn, onOwnChange, ownedApp, ownedRom, removeOwn, retryOwn, syncLibrary } from "./own";
+import { GameState, RommCollection, TenderGame, addOwn, rommCollections, turnCollection, giveBackTender, takeOverTender, tenderGames, tenderOn, clearLostOwn, dropNotInstalled, gameState, loadOwned, lostOwn, onOwnChange, ownedApp, ownedRom, removeOwn, retryOwn, syncLibrary } from "./own";
 import { openGame } from "./page";
 import { PairAnswer, RommHealth, ServerAnswer, checkRomm, pairRomm, rommServer, setRommServer, unlinkRomm, useRomm } from "./romm";
 import { setOwnGames, setSyncSaves, useOwnGames, useSyncSaves } from "./settings";
@@ -28,6 +28,7 @@ export function Settings() {
       )}
       {games && <TenderRow />}
       {games && <LibraryRow />}
+      {games && <CollectionsRow />}
       {games && <OwnRow />}
       {games && <LostRow />}
     </PanelSection>
@@ -134,6 +135,89 @@ function LibraryRow() {
         </ButtonItem>
       </PanelSectionRow>
     </>
+  );
+}
+
+// RomM's collections: one row saying how many are shown in Steam, and a dialog to choose them.
+function CollectionsRow() {
+  const status = useRomm();
+  const [shown, setShown] = useState<number | null>(null);
+  const read = useCallback(() => {
+    rommCollections()
+      .then((r) => setShown(r.ok ? r.collections.filter((c) => c.on).length : null))
+      .catch(() => setShown(null));
+  }, []);
+  useEffect(read, [read, status]);
+  if (status !== "linked") return null;
+  return (
+    <PanelSectionRow>
+      <ButtonItem
+        layout="below"
+        label={t.collectionsLabel}
+        description={shown ? t.collectionsOn(shown) : t.collectionsDesc}
+        onClick={() => showModal(<CollectionsModal onDone={read} />)}
+      >
+        {t.collectionsChoose}
+      </ButtonItem>
+    </PanelSectionRow>
+  );
+}
+
+const KIND_ORDER = ["standard", "smart", "collection", "franchise", "genre", "company", "mode"];
+const groupOf = (c: RommCollection) => (c.kind === "virtual" ? c.sort : c.kind);
+
+function CollectionsModal({ onDone, closeModal }: { onDone: () => void; closeModal?: () => void }) {
+  const [list, setList] = useState<RommCollection[] | null>(null);
+  const [why, setWhy] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [said, setSaid] = useState<string | null>(null);
+  useEffect(() => {
+    rommCollections()
+      .then((r) => (r.ok ? setList(r.collections) : setWhy(r.why ?? "error")))
+      .catch(() => setWhy("unreachable"));
+  }, []);
+  const turn = (c: RommCollection, on: boolean) => {
+    setBusy(true);
+    setSaid(null);
+    turnCollection(c, on, (n, of) => setSaid(t.libraryStep(n, of))).then((w) => {
+      // What is kept decides how each switch stands, whatever came of bringing the games.
+      rommCollections()
+        .then((r) => r.ok && setList(r.collections))
+        .catch(() => undefined);
+      setSaid(w ? t.ownWhy(w) : on ? t.collectionsDone(c.name) : t.collectionsOff(c.name));
+      setBusy(false);
+      onDone();
+    });
+  };
+  const groups = KIND_ORDER.map((k) => [k, (list ?? []).filter((c) => groupOf(c) === k)] as const).filter(([, cs]) => cs.length);
+  const note = why ? t.ownWhy(why) : !list ? t.collectionsLoading : !list.length ? t.collectionsNone : said;
+  return (
+    <ConfirmModal
+      strTitle={t.collectionsLabel}
+      strDescription={t.collectionsSteps}
+      strOKButtonText={t.rommDone}
+      bAlertDialog
+      bOKDisabled={busy}
+      closeModal={() => undefined}
+      onOK={() => closeModal?.()}
+    >
+      {note && <div style={{ margin: "10px 0", lineHeight: 1.45, color: "rgba(255,255,255,0.7)" }}>{note}</div>}
+      {groups.map(([k, cs]) => (
+        <div key={k} style={{ marginTop: 12 }}>
+          <div style={{ fontSize: 12, letterSpacing: 0.4, textTransform: "uppercase", color: "rgba(255,255,255,0.55)" }}>{t.collectionsKind(k)}</div>
+          {cs.map((c) => (
+            <ToggleField
+              key={c.key}
+              label={c.name}
+              description={t.collectionsGames(c.roms.length)}
+              checked={c.on}
+              disabled={busy}
+              onChange={(on) => turn(c, on)}
+            />
+          ))}
+        </div>
+      ))}
+    </ConfirmModal>
   );
 }
 
