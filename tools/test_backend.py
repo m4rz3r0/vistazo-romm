@@ -400,6 +400,25 @@ def test_server():
     check("asleep address kept", run(plugin.romm_server())["url"], asleep)
     check("RomM there", run(plugin.romm_set_server(URL + "/", True)), {"result": "ok"})
     check("plain http never skips checks", run(plugin.romm_server()), {"url": URL, "insecure": False})
+    check("scheme as checks read it", main._clean_url("HTTPS://Romm.example"), "https://Romm.example")
+    for bad in ("http://romm.local?", "http://romm.local/#"):
+        check("empty query or fragment: %r" % bad, main._clean_url(bad), None)
+    import socket as sk
+    talker = sk.socket()
+    talker.bind(("127.0.0.1", 0))
+    talker.listen(1)
+
+    def speak():
+        c, _ = talker.accept()
+        c.recv(1024)
+        c.sendall(b"SSH-2.0-OpenSSH\r\n")
+        c.close()
+    threading.Thread(target=speak, daemon=True).start()
+    check("not HTTP on that port", run(plugin.romm_set_server("http://127.0.0.1:%d" % talker.getsockname()[1])), {"result": "not-romm"})
+    talker.close()
+    main._write_private(main.SERVER_FILE, {"url": URL, "insecure": "no"})
+    check("only a true choice skips the check", run(plugin.romm_server())["insecure"], False)
+    main._write_private(main.SERVER_FILE, {"url": URL, "insecure": False})
     check("an https address can skip the check", main._clean_url("https://romm.example:8443/sub/"), "https://romm.example:8443/sub")
 
 

@@ -109,8 +109,10 @@ function ServerModal({ onDone, closeModal }: { onDone: () => void; closeModal?: 
   const [askCert, setAskCert] = useState(false);
   const [busy, setBusy] = useState(false);
   const [answer, setAnswer] = useState<ServerAnswer | null>(null);
+  const [kept, setKept] = useState({ url: "", insecure: false });
   useEffect(() => {
     rommServer().then((s) => {
+      setKept(s);
       setUrl(s.url);
       setInsecure(s.insecure);
       setAskCert(s.insecure);
@@ -149,10 +151,18 @@ function ServerModal({ onDone, closeModal }: { onDone: () => void; closeModal?: 
           onChange={(e) => {
             setUrl(e.target.value);
             setAnswer(null);
+            // Accepting a certificate is for the address it was asked about, not a new one.
+            if (e.target.value.trim() !== kept.url) {
+              setInsecure(false);
+              setAskCert(false);
+            } else {
+              setInsecure(kept.insecure);
+              setAskCert(kept.insecure);
+            }
           }}
         />
       )}
-      {!done && askCert && url.trim().startsWith("https:") && (
+      {!done && askCert && /^https:/i.test(url.trim()) && (
         <ToggleField label={t.serverInsecure} description={t.serverInsecureDesc} checked={insecure} disabled={busy} onChange={setInsecure} />
       )}
       {note && (

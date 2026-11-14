@@ -57,9 +57,10 @@ def _clean_url(url):
         return None
     if parts.scheme not in ("http", "https") or not parts.hostname or parts.username or parts.password:
         return None
-    if parts.query or parts.fragment or any(c.isspace() for c in url):
+    if "?" in url or "#" in url or any(c.isspace() for c in url):
         return None
-    return url
+    # The scheme as every check here reads it: "HTTPS://" is "https://".
+    return parts.scheme + url[len(parts.scheme):]
 
 
 def _own_server():
@@ -69,7 +70,7 @@ def _own_server():
     except (OSError, ValueError):
         return None
     url = _clean_url(data.get("url")) if isinstance(data, dict) else None
-    return {"url": url, "insecure": bool(data.get("insecure", False))} if url else None
+    return {"url": url, "insecure": data.get("insecure") is True and url.startswith("https:")} if url else None
 
 
 def _server():
@@ -1234,6 +1235,8 @@ def _probe(server):
         return "certificate" if isinstance(e.reason, ssl.SSLCertVerificationError) else "unreachable"
     except ssl.SSLCertVerificationError:
         return "certificate"
+    except http.client.HTTPException:
+        return "not-romm"  # something that does not speak HTTP answers on that port
     except (OSError, ValueError):
         return "unreachable"
     # Something answered: RomM only if it is RomM's own answer (a web page there is not).
