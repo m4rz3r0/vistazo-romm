@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import { t } from "./i18n";
 import { GameState, RommCollection, Version, busyJob, gameEmulators, setEmulator, cancelOwn, clearGone, goneOwn, pauseOwn, playState, gameVersions, running, switchVersion, TenderGame, addOwn, rommCollections, turnCollection, giveBackTender, takeOverTender, tenderGames, tenderOn, clearLostOwn, dropNotInstalled, gameState, loadOwned, lostOwn, onOwnChange, ownedApp, ownedRom, removeOwn, retryOwn, syncLibrary } from "./own";
 import { openGame } from "./page";
+import { deviceState } from "./own";
 import { PairAnswer, RommHealth, ServerAnswer, checkRomm, pairRomm, rommServer, setRommServer, unlinkRomm, useRomm } from "./romm";
 import { LANGUAGES, setOwnGames, setPreferredLanguage, setSyncSaves, useOwnGames, usePreferredLanguage, useSyncSaves } from "./settings";
 
@@ -34,6 +35,7 @@ export function Settings() {
       {games && <LostRow />}
       {games && <GoneRow />}
       {games && <PlayRow />}
+      {games && <DeviceRow />}
     </PanelSection>
   );
 }
@@ -656,6 +658,22 @@ function PlayRow() {
   return (
     <PanelSectionRow>
       <div style={{ fontSize: 12, lineHeight: 1.45, opacity: 0.7 }}>{t.playLimited}</div>
+    </PanelSectionRow>
+  );
+}
+
+// RomM is told which device saves and play time come from only with a key that may register this
+// Deck: said once, while it may not.
+function DeviceRow() {
+  const status = useRomm();
+  const [allowed, setAllowed] = useState(true);
+  useEffect(() => {
+    if (status === "linked") deviceState().then((d) => setAllowed(!!d?.allowed)).catch(() => undefined);
+  }, [status]);
+  if (status !== "linked" || allowed) return null;
+  return (
+    <PanelSectionRow>
+      <div style={{ fontSize: 12, lineHeight: 1.45, opacity: 0.7 }}>{t.deviceLimited}</div>
     </PanelSectionRow>
   );
 }

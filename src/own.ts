@@ -289,6 +289,7 @@ export async function clearGone(appids: number[]): Promise<string | null> {
 export const playStarted = callable<[appid: number], Reply>("play_started");
 export const playEnded = callable<[appid: number], Reply & { kept?: boolean; waiting?: number }>("play_ended");
 export const playState = callable<[], { allowed: boolean; waiting: number }>("play_state");
+export const deviceState = callable<[], { allowed: boolean }>("device_state");
 
 // Entries made before the launcher moved (it used to live in Vistazo's own folder) are pointed
 // at where it is now. Setting the same values again changes nothing.

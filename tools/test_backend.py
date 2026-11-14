@@ -72,6 +72,13 @@ class RomM:
         self.collections_down = set()  # "standard", "smart" or a sort: answered with 500
         self.play = []  # each batch of play sessions sent
         self.play_down = 0  # a status to answer play sessions with instead
+        self.scopes = {}  # raw token -> its scopes
+        self.devices = {}  # device id -> what it was registered with
+        self.devices_down = 0  # a status to answer the devices endpoints with instead
+        self.synced = set()  # (device id, save id): the versions RomM knows each device has
+        self.downloaded = []  # (save id, body) of each download a device confirmed
+        self.play_devices = []  # the device id each batch of play sessions came with
+        self.upload_down = 0  # a status to answer save uploads with, once the device is checked
 
 
 romm = RomM()
@@ -162,7 +169,25 @@ class Handler(BaseHTTPRequestHandler):
             data = data[:-2] if data.endswith(b"\r\n") else data
             name = head.split(b'filename="')[1].split(b'"')[0].decode()
             romm.uploads.append((q, name))
-            return self.reply(201, add_save(int(q["rom_id"][0]), data, name, q.get("emulator", [None])[0], q.get("slot", [None])[0]))
+            # As RomM 5.4.1: a device must be the player's, and may only add to a slot whose newest
+            # version it has seen, unless told to overwrite.
+            device = q.get("device_id", [None])[0]
+            if device is not None:
+                if "devices.write" not in romm.scopes.get(bearer, ()):
+                    return self.reply(403)
+                if device not in romm.devices:
+                    return self.reply(404)
+                slot_saves = [s for s in romm.saves if s["rom_id"] == int(q["rom_id"][0]) and s["slot"] == q.get("slot", [None])[0]]
+                newest = max(slot_saves, key=lambda s: s["updated_at"]) if slot_saves else None
+                if newest and q.get("overwrite") != ["true"] and (device, newest["id"]) not in romm.synced:
+                    return self.reply(409)
+            if romm.upload_down:
+                return self.reply(romm.upload_down)
+            saved = add_save(int(q["rom_id"][0]), data, name, q.get("emulator", [None])[0], q.get("slot", [None])[0])
+            if device is not None:
+                romm.saves[-1]["origin_device_id"] = device
+                romm.synced.add((device, saved["id"]))
+            return self.reply(201, saved)
         body = json.loads(raw) if raw else None
         romm.calls.append((method, self.path, bearer))
         parts = self.path.split("?")[0].strip("/").split("/")
@@ -172,6 +197,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(404)
             token = "tok-%d" % hit[0]
             romm.tokens[token] = hit[0]
+            romm.scopes[token] = list(hit[1])
             return self.reply(200, {"id": hit[0], "raw_token": token, "scopes": hit[1]})
         if method == "DELETE" and parts[:2] == ["api", "client-tokens"]:
             romm.deleted.append((int(parts[2]), bearer))
@@ -183,8 +209,28 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(romm.play_down)
             sessions = body["sessions"]
             romm.play.append(sessions)
+            romm.play_devices.append(body.get("device_id"))
             return self.reply(201, {"results": [{"index": i, "status": "created", "id": i + 1} for i in range(len(sessions))],
                                     "created_count": len(sessions), "skipped_count": 0})
+        if parts[:2] == ["api", "devices"] or (parts[:2] == ["api", "saves"] and parts[3:] == ["downloaded"]):
+            if "devices.write" not in romm.scopes.get(bearer, ()):
+                return self.reply(403)
+            if romm.devices_down:
+                return self.reply(romm.devices_down)
+            if method == "POST" and parts == ["api", "devices"]:
+                import uuid
+                device = str(uuid.uuid4())
+                romm.devices[device] = body
+                return self.reply(201, {"device_id": device, "name": body.get("name"), "created_at": "2026-11-14T10:00:00Z"})
+            if method == "PUT" and len(parts) == 3:
+                return self.reply(200, {"id": parts[2], **romm.devices[parts[2]]}) if parts[2] in romm.devices else self.reply(404)
+            if method == "POST" and parts[3:] == ["downloaded"]:
+                if body.get("device_id") not in romm.devices:
+                    return self.reply(404)
+                romm.downloaded.append((int(parts[2]), body))
+                romm.synced.add((body["device_id"], int(parts[2])))
+                return self.reply(200, {"id": int(parts[2])})
+            return self.reply(405)
         if self.path == "/api/users/me":
             return self.reply(200, {"id": 1, "ra_progression": {"results": [
                 {"rom_ra_id": 77, "num_awarded": 2, "num_awarded_hardcore": 1, "max_possible": 130,
@@ -286,6 +332,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         self.handle_one("DELETE")
+
+    def do_PUT(self):
+        self.handle_one("PUT")
 
 
 class Quiet(ThreadingHTTPServer):
@@ -2028,6 +2077,142 @@ b</command>
     os.remove(target)
 
 
+def test_device():
+    """This Deck as one of the player's devices in RomM: registered once, with nothing personal,
+    and named on each save and play session it sends."""
+    with open(os.path.join(HOME, main.RETROARCH_CFG), "w") as f:
+        f.write('savefile_directory = "~/retrodeck/saves"\nsavefiles_in_content_dir = "false"\n'
+                'sort_savefiles_by_content_enable = "true"\nsort_savefiles_enable = "false"\n')
+    romm.roms[80] = rom(80, "Device.nds")
+    rom_file = os.path.join(ROMS, "nds", "Device.nds")
+    save = os.path.join(HOME, "retrodeck", "saves", "nds", "Device.srm")
+    with open(rom_file, "wb") as f:
+        f.write(DATA)
+
+    def write(data):
+        os.makedirs(os.path.dirname(save), exist_ok=True)
+        with open(save, "wb") as f:
+            f.write(data)
+
+    def sync(choice=""):
+        return run(plugin.save_sync(8000, choice))
+
+    def registered():
+        return [c for c in romm.calls if c[0] == "POST" and c[1] == "/api/devices"]
+
+    def device_of(q):
+        return q.get("device_id", [None])[0]
+
+    session = {"rom_id": 80, "start_time": "2026-11-14T10:00:00Z", "end_time": "2026-11-14T11:00:00Z", "duration_ms": 3600000}
+
+    # A key that may not modify devices: everything goes as before, from no device, and the
+    # settings say so.
+    romm.codes["DVCEKEYA"] = (80, GAMES + ["roms.user.read", "roms.user.write"])
+    check("key without devices paired", pair("DVCEKEYA", True)["result"], "ok")
+    check("no device without it", run(plugin.device_state()), {"allowed": False})
+    run(plugin.game_take(8000, 80))
+    write(b"first from the deck")
+    check("sent", sync()["state"], "sent")
+    check("from no device", device_of(romm.uploads[-1][0]), None)
+    main._play_keep(session)
+    run(plugin.play_state())
+    check("play time from no device", romm.play_devices[-1:], [None])
+    check("nothing registered", (registered(), os.path.exists(main.DEVICE_FILE)), ([], False))
+
+    # Modifying devices is the only thing more a key may do for it: one that may also see the
+    # devices, or more, is still refused and deleted at RomM.
+    romm.codes["DVCEKEYB"] = (81, GAMES + ["devices.read", "devices.write"])
+    check("devices read refused", pair("DVCEKEYB", True), {"result": "scopes", "missing": [], "extra": ["devices.read"]})
+    check("and revoked", romm.deleted[-1], (81, "tok-81"))
+    romm.codes["DVCEKEYC"] = (82, GAMES + ["devices.write", "users.write"])
+    check("wider still refused", pair("DVCEKEYC", True)["extra"], ["users.write"])
+    check("the kept key stays", run(plugin.device_state()), {"allowed": False})
+
+    # A key that may: the Deck is registered once, as a Steam Deck and nothing that tells who or where.
+    romm.codes["DVCEKEYD"] = (83, GAMES + ["roms.user.read", "roms.user.write", "devices.write"])
+    check("key with devices paired", pair("DVCEKEYD", True), {"result": "ok", "missing": [], "extra": []})
+    check("device allowed", run(plugin.device_state()), {"allowed": True})
+    write(b"second from the deck")
+    sent = len(romm.uploads)
+    check("sent as the device", sync()["state"], "sent")
+    check("registered once", len(registered()), 1)
+    device = next(iter(romm.devices))
+    check("registered with nothing personal", romm.devices[device], {"name": "Steam Deck", "platform": "SteamOS", "client": "Vistazo RomM"})
+    check("device file private", mode(main.DEVICE_FILE), 0o600)
+    with open(main.DEVICE_FILE) as f:
+        check("device kept", json.load(f), {"url": URL, "id": device})
+    # RomM had not seen the slot's newest from this device (it went before there was one): it
+    # refuses, and the save goes as it did without one, now marked with the device.
+    tries = [q for q, _ in romm.uploads[sent:]]
+    check("refused once, then sent over", [(device_of(q), q.get("overwrite")) for q in tries], [(device, None), (device, ["true"])])
+    check("RomM knows where it came from", romm.saves[-1].get("origin_device_id"), device)
+    write(b"third from the deck")
+    sent = len(romm.uploads)
+    check("next one straight", (sync()["state"], [(device_of(q), q.get("overwrite")) for q, _ in romm.uploads[sent:]]), ("sent", [(device, None)]))
+    check("still registered once", len(registered()), 1)
+    main._play_keep(session)
+    run(plugin.play_state())
+    check("play time from the device", romm.play_devices[-1], device)
+
+    # A save brought from RomM: RomM is told this Deck has it, and the next one sent goes straight.
+    theirs = add_save(80, b"played elsewhere", "Device.srm")
+    check("brought", sync()["state"], "brought")
+    check("RomM told", romm.downloaded[-1], (theirs["id"], {"device_id": device, "content_hash": theirs["content_hash"]}))
+    write(b"after the one brought")
+    sent = len(romm.uploads)
+    check("sent straight after", (sync()["state"], len(romm.uploads) - sent), ("sent", 1))
+
+    # RomM failing the save for the game itself: the device is not registered again for it.
+    write(b"RomM fails this one")
+    romm.upload_down = 404
+    check("refused for the game", sync()["state"], "unreachable")
+    check("device not registered again", len(registered()), 1)
+    romm.upload_down = 0
+    check("then sent", sync()["state"], "sent")
+
+    # The device deleted in RomM: registered again, and the save goes as the new one.
+    romm.devices.clear()
+    write(b"after the device was deleted")
+    check("sent after deletion", sync()["state"], "sent")
+    check("registered again", len(registered()), 2)
+    again = next(iter(romm.devices))
+    check("as the new device", (again != device, device_of(romm.uploads[-1][0]), romm.saves[-1].get("origin_device_id")), (True, again, again))
+    with open(main.DEVICE_FILE) as f:
+        check("new device kept", json.load(f)["id"], again)
+    # Deleted again while the add-on was not running: play time goes as a new device, not lost
+    # to one RomM no longer knows.
+    romm.devices.clear()
+    main._device_seen.clear()
+    main._play_keep(session)
+    run(plugin.play_state())
+    check("registered a third time", len(registered()), 3)
+    check("play time as the new device", romm.play_devices[-1], next(iter(romm.devices)))
+
+    # RomM not registering it: saves and play time still go, from no device.
+    os.remove(main.DEVICE_FILE)
+    main._device_seen.clear()
+    romm.devices_down = 500
+    write(b"while devices fail")
+    check("sent anyway", (sync()["state"], device_of(romm.uploads[-1][0])), ("sent", None))
+    main._play_keep(session)
+    check("play time anyway", (run(plugin.play_state())["waiting"], romm.play_devices[-1]), (0, None))
+    check("nothing kept", os.path.exists(main.DEVICE_FILE), False)
+    romm.devices_down = 0
+
+    # Back to a key that may not: the device kept is not used.
+    write(b"registered again")
+    sync()
+    check("kept again", os.path.exists(main.DEVICE_FILE), True)
+    romm.codes["DVCEKEYA"] = (84, GAMES + ["roms.user.read", "roms.user.write"])
+    pair("DVCEKEYA", True)
+    write(b"with the old key again")
+    calls = len(romm.calls)
+    check("sent from no device", (sync()["state"], device_of(romm.uploads[-1][0])), ("sent", None))
+    check("no device asked about", [c for c in romm.calls[calls:] if "/api/devices" in c[1] or "downloaded" in c[1]], [])
+    run(plugin.game_release(8000))
+    os.remove(rom_file)
+
+
 try:
     test_server()
     test_move_in()
@@ -2047,6 +2232,7 @@ try:
     test_play()
     test_gone()
     test_queue()
+    test_device()
     print("ok: %d checks" % checks)
 finally:
     server.shutdown()

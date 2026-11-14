@@ -149,7 +149,7 @@ const es = {
   rommLimited: "Conectado solo para los logros. Para llevar los juegos hace falta otra clave: vuelve a conectar.",
   rommAgain: "Conectar de nuevo",
   rommPairStepsGames:
-    "En RomM, en Ajustes › Client API Tokens, crea una clave con estos permisos: Assets (read y write), Collections (read), Firmware (read), Me (read y write), Platforms (read) y Roms (read). Para enviar también el tiempo de juego, añade Roms user (write). Pulsa «Emparejar dispositivo» y escribe aquí el código que aparece: caduca en un minuto.",
+    "En RomM, en Ajustes › Client API Tokens, crea una clave con estos permisos: Assets (read y write), Collections (read), Firmware (read), Me (read y write), Platforms (read) y Roms (read). Para enviar también el tiempo de juego, añade Roms user (write); para que RomM muestre qué partidas vienen de esta Steam Deck, Devices (write). Pulsa «Emparejar dispositivo» y escribe aquí el código que aparece: caduca en un minuto.",
   ownName: (game: string) => `${game} · Vistazo`,
   ownOffer:
     "Crea en Steam una segunda entrada de este juego, a cargo de Vistazo: la descarga de RomM y la inicia. La de Tender sigue igual. Las dos usan la misma partida guardada, y Tender no sincroniza lo que juegues desde la de Vistazo.",
@@ -170,6 +170,7 @@ const es = {
   ownResume: "Seguir descargando",
   ownDiscard: "Descartar lo descargado",
   playLimited: "El tiempo de juego no llega a RomM. Para enviarlo, conecta de nuevo con una clave que además tenga Roms user (write).",
+  deviceLimited: "RomM no muestra qué partidas y tiempo de juego vienen de esta Steam Deck. Para que lo haga, conecta de nuevo con una clave que además tenga Devices (write).",
   ownDownloading: (p: number) => `Descargando: ${p} %`,
   ownReady: "Listo: está en la estantería Retro, con un ojo en la esquina, y en tu biblioteca.",
   ownNoFile: "La entrada está creada, pero falta el juego.",
@@ -332,7 +333,7 @@ const en: typeof es = {
   rommLimited: "Connected for achievements only. Running the games needs another key: connect again.",
   rommAgain: "Connect again",
   rommPairStepsGames:
-    "In RomM, under Settings › Client API Tokens, create a token with these permissions: Assets (read and write), Collections (read), Firmware (read), Me (read and write), Platforms (read) and Roms (read). To send play time too, add Roms user (write). Press “Pair device” and type the code it shows here: it expires in a minute.",
+    "In RomM, under Settings › Client API Tokens, create a token with these permissions: Assets (read and write), Collections (read), Firmware (read), Me (read and write), Platforms (read) and Roms (read). To send play time too, add Roms user (write); for RomM to show which saves come from this Steam Deck, Devices (write). Press “Pair device” and type the code it shows here: it expires in a minute.",
   ownName: (game: string) => `${game} · Vistazo`,
   ownOffer:
     "Adds a second entry of this game to Steam, run by Vistazo: it downloads it from RomM and starts it. Tender's entry stays as it is. Both use the same save, and Tender does not sync what you play from Vistazo's.",
@@ -353,6 +354,7 @@ const en: typeof es = {
   ownResume: "Go on downloading",
   ownDiscard: "Throw away what was downloaded",
   playLimited: "Play time does not reach RomM. To send it, connect again with a token that also has Roms user (write).",
+  deviceLimited: "RomM does not show which saves and play time come from this Steam Deck. For it to, connect again with a token that also has Devices (write).",
   ownDownloading: (p: number) => `Downloading: ${p}%`,
   ownReady: "Ready: it is on the Retro shelf, with an eye in its corner, and in your library.",
   ownNoFile: "The entry is there, but the game is missing.",
