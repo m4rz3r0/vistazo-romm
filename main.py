@@ -1689,12 +1689,12 @@ def _plain_file(path):
 
 
 def _moved_record(rec, old_dir, system_dir):
-    """A copy of a record ({"path", "files", "folders", "marks", "part"}) with its paths under
-    `system_dir`, or None when one of them would lead out of it. A file found there with its
-    mark's size is marked anew (a move by copy does not keep its time); another keeps its old
-    mark, so it never counts as the add-on's."""
+    """A copy of a record ({"path", "files", "folders", "marks", "part", "disc"}) with its paths
+    under `system_dir`, or None when one of them would lead out of it. Marks follow as they were,
+    never made anew: a file that kept its size and time is still the add-on's, any other (a copy
+    that lost its time, or the player's own file of the same size) is never removed by it."""
     new = dict(rec)
-    for key in ("path", "part"):
+    for key in ("path", "part", "disc"):
         if isinstance(rec.get(key), str):
             new[key] = _moved_path(rec[key], old_dir, system_dir)
             if new[key] is None:
@@ -1710,9 +1710,7 @@ def _moved_record(rec, old_dir, system_dir):
             there = _moved_path(path, old_dir, system_dir)
             if there is None:
                 return None
-            same = (there != path and isinstance(mark, list) and mark and _plain_file(there)
-                    and os.path.getsize(there) == mark[0])
-            marks[there] = _mark(there) if same else mark
+            marks[there] = mark
         new["marks"] = marks
     return new
 

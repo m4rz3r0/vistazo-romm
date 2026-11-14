@@ -2267,19 +2267,23 @@ def test_moved_folders():
     games = main._read_games()
     games["games"].update({
         "8101": entry(81, moved, size=len(DATA) + 4, files=[moved, bin_old], folders=[disc_old],
-                      marks={moved: main._mark(moved), bin_old: main._mark(bin_old)}),
+                      marks={moved: main._mark(moved), bin_old: main._mark(bin_old)}, disc=bin_old),
         "8102": entry(82, os.path.join(old, "nds", "Nowhere.nds")),
         "8103": entry(83, os.path.join(old, "nds", "Sized.nds")),
         "8104": entry(84, put(os.path.join(outside, "Still.nds"))),
         "8105": entry(85, os.path.join(old, "nds", "Link.nds")),
         "8106": {"rom_id": 86, "system": "nds", "platform": "nds", "size": 9, "path": None, "installed": False,
                  "files": [], "folders": [], "paused": True, "part": os.path.join(old, "nds", "Half.nds.part")},
+        # The add-on's file is gone (a card taken out, say); the player's own file of that size is there.
+        "8108": entry(88, os.path.join(old, "nds", "Foreign.nds"),
+                      marks={os.path.join(old, "nds", "Foreign.nds"): [len(DATA), 1]}),
     })
     main._write_games(games)
-    # The move: the files as they are now on the card (a copy does not keep their time), the old folder empty.
+    # The move: the files as they are now on the card (with their time, as a move keeps it), the old folder empty.
     time.sleep(0.01)
-    shutil.copyfile(moved, os.path.join(new, "nds", "Moved.nds"))
-    shutil.copyfile(bin_old, os.path.join(new, "nds", "Disc", "a.bin"))
+    shutil.copy2(moved, os.path.join(new, "nds", "Moved.nds"))
+    shutil.copy2(bin_old, os.path.join(new, "nds", "Disc", "a.bin"))
+    put(os.path.join(new, "nds", "Foreign.nds"), DATA[::-1])
     shutil.rmtree(os.path.join(old, "nds"))
     os.makedirs(os.path.join(old, "nds"))
     put(os.path.join(new, "nds", "Other.nds"), b"not the add-on's")
@@ -2296,6 +2300,9 @@ def test_moved_folders():
     check("its files follow", after["8101"]["files"], [here, bin_new])
     check("its folders follow", after["8101"]["folders"], [os.path.join(new, "nds", "Disc")])
     check("its marks follow", list(after["8101"]["marks"]), [here, bin_new])
+    check("the disc chosen follows", after["8101"]["disc"], bin_new)
+    check("the player's file of that size: the entry follows", after["8108"]["path"], os.path.join(new, "nds", "Foreign.nds"))
+    check("but it is not marked the add-on's", after["8108"]["marks"], {os.path.join(new, "nds", "Foreign.nds"): [len(DATA), 1]})
     with open(main.LAUNCH_FILE) as f:
         check("the launcher starts the moved file", json.load(f)["81"], here)
     check("shown as there", run(plugin.game_state(8101))["installed"], True)
@@ -2305,7 +2312,7 @@ def test_moved_folders():
     check("a link out of the folder: refused", after["8105"], before["8105"])
     check("the paused download's half follows", after["8106"]["part"], os.path.join(new, "nds", "Half.nds.part"))
     check("nothing moved or removed", sorted(os.listdir(os.path.join(new, "nds"))),
-          ["Disc", "Half.nds.part", "Link.nds", "Moved.nds", "Other.nds", "Sized.nds"])
+          ["Disc", "Foreign.nds", "Half.nds.part", "Link.nds", "Moved.nds", "Other.nds", "Sized.nds"])
     check("the old folder is left as it was", os.listdir(os.path.join(old, "nds")), [])
 
     # Found when the panel asks too, not only at start.
@@ -2350,8 +2357,10 @@ def test_moved_folders():
     # Removing a moved game takes away only what the add-on brought.
     check("removed", run(plugin.game_remove(8101))["ok"], True)
     check("only its files", sorted(os.listdir(os.path.join(new, "nds"))),
-          ["Half.nds.part", "Later.nds", "Link.nds", "Other.nds", "Sized.nds"])
-    for appid in (8101, 8102, 8103, 8104, 8105, 8106, 8107):
+          ["Foreign.nds", "Half.nds.part", "Later.nds", "Link.nds", "Other.nds", "Sized.nds"])
+    run(plugin.game_remove(8108))
+    check("the player's file is never removed", os.path.isfile(os.path.join(new, "nds", "Foreign.nds")), True)
+    for appid in (8101, 8102, 8103, 8104, 8105, 8106, 8107, 8108):
         run(plugin.game_release(appid))
     if kept_cfg is None:
         os.remove(cfg)

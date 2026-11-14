@@ -2,9 +2,8 @@ import { ButtonItem, ConfirmModal, DropdownItem, PanelSection, PanelSectionRow, 
 import { useCallback, useEffect, useState } from "react";
 import { t } from "./i18n";
 import { GameState, RommCollection, Version, busyJob, gameEmulators, setEmulator, cancelOwn, clearGone, goneOwn, pauseOwn, playState, gameVersions, running, switchVersion, TenderGame, addOwn, rommCollections, turnCollection, giveBackTender, takeOverTender, tenderGames, tenderOn, clearLostOwn, dropNotInstalled, gameState, loadOwned, lostOwn, onOwnChange, ownedApp, ownedRom, removeOwn, retryOwn, syncLibrary } from "./own";
-import { Disc, gameDiscs, setDisc } from "./own";
+import { Disc, deviceState, gameDiscs, setDisc } from "./own";
 import { openGame } from "./page";
-import { deviceState } from "./own";
 import { SgdbRow } from "./Sgdb";
 import { InputRows } from "./InputRow";
 import { PairAnswer, RommHealth, ServerAnswer, checkRomm, pairRomm, rommServer, setRommServer, unlinkRomm, useRomm } from "./romm";
