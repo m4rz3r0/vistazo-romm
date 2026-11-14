@@ -95,7 +95,7 @@ const COVER = 0;
 const ART: [number, string][] = [
   [1, "GetCustomHeroImageURLs"],
   [2, "GetCustomLogoImageURLs"],
-  [3, "GetCustomLandscapeImageURLs"],
+  [3, "GetCustomLandcapeImageURLs"], // sic: Steam's own spelling
 ];
 
 // One of an entry's pictures as Steam wants it handed over: [base64, kind], or null.
@@ -119,13 +119,13 @@ async function picture(urls: string[]): Promise<[string, string] | null> {
   return null;
 }
 
-// The pictures RomM keeps for a game (its copies of ScreenScraper's wide picture, logo and wide
-// capsule), for the ones the entry lacks. RomM is asked at most once a day per game: a game
-// without them is not asked about at every page.
+// The pictures RomM keeps for a game (its copies of ScreenScraper's wide picture and logo), for
+// the ones the entry lacks. RomM is asked at most once a day per game: a game without them is not
+// asked about at every page. (RomM 5.4 keeps no wide capsule of its own: that one comes from
+// Tender's entry while there is one.)
 const FROM_ROMM: [number, "hero" | "logo" | "wide", string][] = [
   [1, "hero", "GetCustomHeroImageURLs"],
   [2, "logo", "GetCustomLogoImageURLs"],
-  [3, "wide", "GetCustomLandscapeImageURLs"],
 ];
 const ASKED = "vistazo-romm:pictures-asked";
 const DAY = 24 * 60 * 60 * 1000;
