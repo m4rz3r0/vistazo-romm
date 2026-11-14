@@ -12,6 +12,13 @@ It does nothing without Vistazo installed.
   of it to Steam that this add-on downloads from RomM and starts in RetroDECK, with Vistazo's own page. Removing it
   takes away that entry and only the files the add-on brought. It works next to
   [Tender](https://github.com/danielcopper/romm-tender), which keeps the entries it made.
+- **Downloads.** One game comes at a time; the others wait their turn. A download can be paused (on the game's page,
+  stopping it pauses it) and goes on from where it stopped, even after a restart, still checked against RomM's sum.
+- **Play time.** Each session of a game played from its entry goes to RomM, with the time played (the Deck's sleep
+  left out). Sessions wait on the Deck while RomM is asleep and go once it answers. It needs a token that can also
+  write Roms user.
+- **Games deleted in RomM.** The settings list the entries whose game RomM no longer has, and remove them when you
+  say so: only the files the add-on brought go, saves stay.
 - **Versions of a game.** When RomM keeps a game in several versions (languages, regions), *Language of the games*
   picks which one new entries use, and the panel, with the game's page open, switches the one an entry starts. An
   installed game gets the other version brought first (the old one plays meanwhile); its save goes with it when the
@@ -42,8 +49,8 @@ to the address it was made for: after changing it, connect again.
 
 In RomM, under Settings › Client API Tokens, create a token and press **Pair device**; type the short code on the
 Deck. For achievements only, the token needs just Me (read and write). To look after games it also needs Assets
-(read and write), Collections (read), Firmware (read), Platforms (read) and Roms (read). A token that can do more
-than that is refused and deleted at RomM.
+(read and write), Collections (read), Firmware (read), Platforms (read) and Roms (read); to send play time, Roms user
+(read and write) too. A token that can do more than that is refused and deleted at RomM.
 
 ## Privacy and safety
 

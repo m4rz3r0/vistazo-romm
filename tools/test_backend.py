@@ -5,6 +5,7 @@ Nothing here talks to a real server or touches the real home: `decky` is a stand
 the temporary folder, and "flatpak" is a script that only writes down what it was started with."""
 import asyncio
 import io
+import datetime
 import json
 import os
 import shutil
@@ -56,6 +57,8 @@ class RomM:
         self.deleted = []
         self.roms = {}
         self.content = {}  # rom id -> bytes, or a callable(handler)
+        self.ranges = True  # whether the rest of a file is sent when asked for
+        self.ranges_asked = []  # the Range header of each download (None: the whole file)
         self.redirect_to = None
         self.refuse = set()  # rom ids answered with 401
         self.covers = {}  # file name -> bytes
@@ -67,6 +70,8 @@ class RomM:
         self.meanwhile = None  # called while a save is on its way
         self.collections = {"standard": [], "smart": [], "virtual": {}}  # virtual: sort -> list
         self.collections_down = set()  # "standard", "smart" or a sort: answered with 500
+        self.play = []  # each batch of play sessions sent
+        self.play_down = 0  # a status to answer play sessions with instead
 
 
 romm = RomM()
@@ -162,6 +167,13 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(204)
         if bearer not in romm.tokens:
             return self.reply(401)
+        if method == "POST" and self.path == "/api/play-sessions":
+            if romm.play_down:
+                return self.reply(romm.play_down)
+            sessions = body["sessions"]
+            romm.play.append(sessions)
+            return self.reply(201, {"results": [{"index": i, "status": "created", "id": i + 1} for i in range(len(sessions))],
+                                    "created_count": len(sessions), "skipped_count": 0})
         if self.path == "/api/users/me":
             return self.reply(200, {"id": 1, "ra_progression": {"results": [
                 {"rom_ra_id": 77, "num_awarded": 2, "num_awarded_hardcore": 1, "max_possible": 130,
@@ -236,6 +248,18 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(404)
             if callable(content):
                 return content(self)
+            asked = self.headers.get("Range")
+            romm.ranges_asked.append(asked)
+            if asked and romm.ranges:
+                start = int(asked[len("bytes="):-1])
+                if start >= len(content):
+                    return self.reply(416)
+                self.send_response(206)
+                self.send_header("Content-Range", "bytes %d-%d/%d" % (start, len(content) - 1, len(content)))
+                self.send_header("Content-Length", str(len(content) - start))
+                self.end_headers()
+                self.wfile.write(content[start:])
+                return
             self.send_response(200)
             self.send_header("Content-Length", str(len(content)))
             self.end_headers()
@@ -301,7 +325,7 @@ def wait(appid, timeout=10):
     end = time.monotonic() + timeout
     while time.monotonic() < end:
         state = run(plugin.game_state(appid))
-        if state.get("job", {}).get("state") != "downloading":
+        if state.get("job", {}).get("state") not in ("downloading", "queued"):
             return state
         time.sleep(0.02)
     raise AssertionError("download did not end")
@@ -998,7 +1022,18 @@ def test_download():
     run(plugin.game_download(500))
     state = wait(500)
     check("cut short", (state["job"]["state"], state["installed"]), ("unreachable", False))
-    check("cut short leaves nothing", (os.path.exists(target), leftovers()), (False, []))
+    check("cut short keeps what came", (os.path.exists(target), leftovers(), os.path.getsize(target + ".part")),
+          (False, ["Game.nds.part"], 1000))
+    # Asked again, it goes on from there.
+    romm.content[5] = DATA
+    romm.ranges_asked.clear()
+    run(plugin.game_download(500))
+    check("went on", wait(500)["job"]["state"], "installed")
+    check("only the rest asked for", romm.ranges_asked, ["bytes=1000-"])
+    with open(target, "rb") as f:
+        check("went on whole", f.read() == DATA, True)
+    check("nothing half-done after", leftovers(), [])
+    run(plugin.game_remove(500))
 
     # A whole answer of the wrong size is not the game either.
     romm.content[5] = DATA[:-1]
@@ -1527,6 +1562,227 @@ def test_saves():
     check("the game's own files were never touched by all this", os.path.isfile(save), True)
 
 
+def test_play():
+    romm.roms[14] = rom(14, "Played.nds")
+    romm.codes["PQRSTUVW"] = (14, GAMES)
+    pair("PQRSTUVW", True)
+    run(plugin.game_take(1400, 14))
+    check("no play time with a key that may not write it", run(plugin.play_state()), {"allowed": False, "waiting": 0})
+    check("a game not the add-on's has no session", run(plugin.play_started(9999))["why"], "game")
+    check("nor an end", run(plugin.play_ended(9999))["why"], "game")
+    check("started", run(plugin.play_started(1400)), {"ok": True})
+    check("too short to count", run(plugin.play_ended(1400)), {"ok": True, "kept": False})
+    check("nothing kept for it", main._read_play(), [])
+
+    # An hour on the clock, half of it asleep: half an hour played.
+    run(plugin.play_started(1400))
+    rom_id, began, clock = main._playing[1400]
+    main._playing[1400] = (rom_id, began - 3600, clock - 1800)
+    got = run(plugin.play_ended(1400))
+    check("kept, waiting for a key that may send it", got, {"ok": True, "kept": True, "waiting": 1})
+    session = main._read_play()[0]
+    check("its game", session["rom_id"], 14)
+    check("time played, not the sleep", 1800000 <= session["duration_ms"] < 1805000, True)
+    start = datetime.datetime.strptime(session["start_time"], "%Y-%m-%dT%H:%M:%SZ")
+    end = datetime.datetime.strptime(session["end_time"], "%Y-%m-%dT%H:%M:%SZ")
+    check("from start to end, as the clock says", 3595 <= (end - start).total_seconds() <= 3605, True)
+    check("play file private", mode(main.PLAY_FILE), 0o600)
+    check("nothing sent with that key", romm.play, [])
+
+    # A key that may write the player's data of each game: still good for everything, and it sends.
+    romm.codes["WXYZ2345"] = (15, GAMES + ["roms.user.read", "roms.user.write"])
+    check("key with play time paired", pair("WXYZ2345", True), {"result": "ok", "missing": [], "extra": []})
+    check("still linked", run(plugin.romm_status()), "linked")
+    check("sent once allowed", run(plugin.play_state()), {"allowed": True, "waiting": 0})
+    check("as RomM takes it", romm.play, [[session]])
+    check("with the add-on's key", [c for c in romm.calls if c[1] == "/api/play-sessions"][-1][2], "tok-15")
+
+    # RomM asleep: they wait, and go once it answers.
+    romm.play_down = 503
+    run(plugin.play_started(1400))
+    main._playing[1400] = (14, time.time() - 120, time.monotonic() - 120)
+    check("waits while RomM does not answer", run(plugin.play_ended(1400))["waiting"], 1)
+    romm.play_down = 0
+    check("goes later", run(plugin.play_state())["waiting"], 0)
+    check("one more sent", len(romm.play), 2)
+
+    # Many at once: at most a hundred a time.
+    main._write_private(main.PLAY_FILE, {"sessions": [dict(session, rom_id=n) for n in range(150)]})
+    run(plugin.play_state())
+    check("in batches", [len(b) for b in romm.play[2:]], [100, 50])
+    # One RomM will never take is not kept waiting for ever.
+    romm.play_down = 422
+    main._write_private(main.PLAY_FILE, {"sessions": [session]})
+    check("refused for good, dropped", run(plugin.play_state())["waiting"], 0)
+    romm.play_down = 0
+    # Kept waiting: at most so many, the oldest go first.
+    romm.play_down = 503
+    main.PLAY_MOST, most = 3, main.PLAY_MOST
+    for n in range(5):
+        main._play_keep(dict(session, rom_id=n))
+    check("oldest dropped", [x["rom_id"] for x in main._read_play()], [2, 3, 4])
+    main.PLAY_MOST = most
+    romm.play_down = 0
+    run(plugin.play_state())
+    run(plugin.game_release(1400))
+
+
+def test_gone():
+    romm.roms[15] = rom(15, "Kept.nds")
+    romm.roms[16] = rom(16, "Deleted.nds")
+    run(plugin.game_take(1500, 15))
+    run(plugin.game_take(1600, 16))
+    check("none gone yet", run(plugin.game_gone()), {"ok": True, "apps": []})
+    del romm.roms[16]
+    check("the one deleted in RomM", run(plugin.game_gone()), {"ok": True, "apps": [1600]})
+    asked = [c[1] for c in romm.calls if c[1].startswith("/api/roms/1")][-1:]
+    check("asked for by itself before it counts", asked, ["/api/roms/16"])
+    # A game RomM will not show is not taken as gone.
+    romm.roms[16] = rom(16, "Deleted.nds")
+    listed = romm.roms
+    romm.roms = {k: v for k, v in listed.items() if k != 16}
+    romm.refuse.add(16)
+    check("not counted when RomM does not say so", run(plugin.game_gone())["ok"], False)
+    romm.refuse.discard(16)
+    romm.roms = listed
+    for appid in (1500, 1600):
+        run(plugin.game_release(appid))
+
+
+def test_queue():
+    target = os.path.join(ROMS, "nds", "Queued.nds")
+    romm.roms[17] = rom(17, "Paused.nds")
+    romm.roms[18] = rom(18, "Queued.nds")
+    import hashlib
+    romm.roms[17]["files"][0]["sha1_hash"] = hashlib.sha1(DATA).hexdigest()
+    paused = os.path.join(ROMS, "nds", "Paused.nds")
+    run(plugin.game_take(1700, 17))
+    run(plugin.game_take(1800, 18))
+    going = threading.Event()
+    hold = threading.Event()
+
+    def slow(h):
+        h.send_response(200)
+        h.send_header("Content-Length", str(len(DATA)))
+        h.end_headers()
+        try:
+            for i in range(0, len(DATA), 1000):
+                h.wfile.write(DATA[i:i + 1000])
+                h.wfile.flush()
+                if i >= 50000:
+                    going.set()
+                    hold.wait(5)
+        except OSError:
+            pass
+
+    main.CHUNK = 4096
+    romm.content[17] = slow
+    romm.content[18] = DATA
+    run(plugin.game_download(1700))
+    going.wait(5)
+    check("one at a time: the next waits", run(plugin.game_download(1800))["job"]["state"], "queued")
+    check("no removing while queued", run(plugin.game_remove(1800))["why"], "busy")
+
+    # Paused: what came stays, and the next in the queue goes.
+    check("paused", run(plugin.game_pause(1700))["ok"], True)
+    hold.set()
+    state = wait(1700)
+    check("paused state", (state["job"]["state"], state["installed"]), ("paused", False))
+    check("half kept", os.path.isfile(paused + ".part"), True)
+    with open(main.GAMES_FILE) as f:
+        check("written down as paused", json.load(f)["games"]["1700"].get("paused"), True)
+    check("the queued one came", wait(1800)["job"]["state"], "installed")
+    check("nothing to pause now", run(plugin.game_pause(1700))["ok"], False)
+
+    # A restart keeps a paused one, and the page still says how far it got.
+    have = os.path.getsize(paused + ".part")
+    main._jobs.clear()
+    main._sweep_parts()
+    check("paused one survives a restart", os.path.isfile(paused + ".part"), True)
+    state = run(plugin.game_state(1700))
+    check("still paused", (state["job"]["state"], state["job"]["done"]), ("paused", have))
+
+    # Going on: only the rest is asked for, and the whole is checked against RomM's sum.
+    romm.content[17] = DATA
+    romm.ranges_asked.clear()
+    run(plugin.game_download(1700))
+    check("went on", wait(1700)["job"]["state"], "installed")
+    check("from where it stopped", romm.ranges_asked, ["bytes=%d-" % have])
+    with open(paused, "rb") as f:
+        check("whole", f.read() == DATA, True)
+    check("nothing half-done left", leftovers(), [])
+    run(plugin.game_remove(1700))
+
+    # A RomM that sends the whole file again: started again, still whole.
+    with open(paused + ".part", "wb") as f:
+        f.write(DATA[:5000])
+    main._note_part(1700, paused + ".part", kept=True)
+    romm.ranges = False
+    run(plugin.game_download(1700))
+    check("started again", wait(1700)["job"]["state"], "installed")
+    with open(paused, "rb") as f:
+        check("whole after starting again", f.read() == DATA, True)
+    romm.ranges = True
+    run(plugin.game_remove(1700))
+    # Wrong bytes kept from before are caught by the sum, and not kept again.
+    with open(paused + ".part", "wb") as f:
+        f.write(bytes(5000))
+    main._note_part(1700, paused + ".part", kept=True)
+    run(plugin.game_download(1700))
+    check("wrong half caught", wait(1700)["job"]["state"], "damaged")
+    check("and thrown away", leftovers(), [])
+    # Everything there already: started again rather than taken as done.
+    with open(paused + ".part", "wb") as f:
+        f.write(DATA)
+    main._note_part(1700, paused + ".part", kept=True)
+    run(plugin.game_download(1700))
+    check("nothing left to send: started again", wait(1700)["job"]["state"], "installed")
+    run(plugin.game_remove(1700))
+
+    # Cancelling a paused one throws away what it brought.
+    with open(paused + ".part", "wb") as f:
+        f.write(DATA[:5000])
+    main._note_part(1700, paused + ".part", kept=True)
+    main._jobs.clear()
+    state = run(plugin.game_cancel(1700))
+    check("cancelled paused", ("job" in state, leftovers()), (False, []))
+    with open(main.GAMES_FILE) as f:
+        game = json.load(f)["games"]["1700"]
+    check("forgotten", ("part" in game, "paused" in game), (False, False))
+
+    # Let go of while paused: its half-done file goes with the entry.
+    with open(paused + ".part", "wb") as f:
+        f.write(DATA[:5000])
+    main._note_part(1700, paused + ".part", kept=True)
+    check("released while paused", run(plugin.game_release(1700))["ok"], True)
+    check("its half went too", leftovers(), [])
+    run(plugin.game_take(1700, 17))
+
+    # Paused while waiting its turn: nothing asked of RomM for it.
+    going.clear()
+    hold.clear()
+    romm.content[17] = slow
+    run(plugin.game_remove(1800))
+    run(plugin.game_download(1700))
+    going.wait(5)
+    asked = len([c for c in romm.calls if "/content/Queued" in c[1]])
+    run(plugin.game_download(1800))
+    check("paused in the queue", run(plugin.game_pause(1800))["job"]["state"], "paused")
+    run(plugin.game_cancel(1700))
+    hold.set()
+    wait(1700)
+    time.sleep(0.2)
+    check("never asked for", len([c for c in romm.calls if "/content/Queued" in c[1]]), asked)
+    check("still paused", run(plugin.game_state(1800))["job"]["state"], "paused")
+    check("cancelled from the queue", run(plugin.game_cancel(1800))["job"]["state"], "cancelled")
+    check("resumes from the queue", (run(plugin.game_download(1800)) and wait(1800))["job"]["state"], "installed")
+    main.CHUNK = 1024 * 1024
+    for appid in (1700, 1800):
+        run(plugin.game_remove(appid))
+        run(plugin.game_release(appid))
+    check("nothing left", (os.path.exists(target), leftovers()), (False, []))
+
+
 try:
     test_server()
     test_move_in()
@@ -1541,6 +1797,9 @@ try:
     test_versions()
     test_bios()
     test_adopt()
+    test_play()
+    test_gone()
+    test_queue()
     print("ok: %d checks" % checks)
 finally:
     server.shutdown()

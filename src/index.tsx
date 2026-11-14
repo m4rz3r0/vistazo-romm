@@ -6,11 +6,14 @@ import { t } from "./i18n";
 import {
   biosFetch,
   biosState,
-  cancelOwn,
+  busyJob,
   gameState,
   loadOwned,
   ownedApps,
   ownedRom,
+  pauseOwn,
+  playEnded,
+  playStarted,
   refreshArt,
   retryOwn,
   running,
@@ -61,13 +64,18 @@ async function bios(appid: number): Promise<AddonGame["bios"]> {
   if (b && ["ok", "missing", "none", "unsupported"].includes(b.state)) biosKnown.set(appid, word);
   return word;
 }
-// When one of its games closes, its save goes to RomM whether or not its page is open.
+// When one of its games closes, its save goes to RomM whether or not its page is open, and the
+// time it was played goes too.
 function watchSaves(): () => void {
   const reg = safe(
     () =>
       SteamClient.GameSessions.RegisterForAppLifetimeNotifications((u: any) => {
         const appid = Number(u?.unAppID);
-        if (!u || u.bRunning !== false || !syncSaves() || !ownGames() || !ownedRom(appid)) return;
+        if (!u || !ownGames() || !ownedRom(appid)) return;
+        if (u.bRunning === true) return void playStarted(appid).catch(() => undefined);
+        if (u.bRunning !== false) return;
+        playEnded(appid).catch(() => undefined);
+        if (!syncSaves()) return;
         // A moment for the emulator to finish writing.
         setTimeout(() => {
           saveSync(appid, "")
@@ -132,12 +140,14 @@ async function file(appid: number): Promise<AddonFile | null> {
   const s = await gameState(appid).catch(() => null);
   if (!s) return null;
   const job = s.job?.state;
-  const failed = !!job && !["downloading", "installed", "cancelled"].includes(job);
+  const share = s.job?.total ? Math.floor((100 * s.job.done) / s.job.total) : 0;
+  const failed = !!job && !["queued", "downloading", "paused", "installed", "cancelled"].includes(job);
+  // Its page has one button: stopping pauses (what came stays) and getting goes on from there.
   return {
     here: s.installed,
-    downloading: job === "downloading",
-    share: s.job?.total ? Math.floor((100 * s.job.done) / s.job.total) : 0,
-    problem: failed ? t.ownWhy(job) : undefined,
+    downloading: busyJob(s),
+    share,
+    problem: job === "paused" && !s.installed ? t.ownPaused(share) : failed ? t.ownWhy(job) : undefined,
   };
 }
 
@@ -190,7 +200,7 @@ const addon: Addon = {
   game,
   file,
   fetchFile: async (appid) => void (await retryOwn(appid)),
-  cancelFile: async (appid) => void (await cancelOwn(appid)),
+  cancelFile: async (appid) => void (await pauseOwn(appid)),
   shelf: () => (ownGames() ? ownedApps() : []),
   actions,
   progress,

@@ -4,6 +4,7 @@
 # Vistazo draws what this hands over; nothing here draws anything.
 import asyncio
 import base64
+import concurrent.futures
 import datetime
 import hashlib
 import http.client
@@ -35,6 +36,8 @@ import decky
 KEY_FILE = os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "romm.json")
 SCOPES = {"me.read", "me.write"}
 SCOPES_GAMES = SCOPES | {"roms.read", "platforms.read", "collections.read", "firmware.read", "assets.read", "assets.write"}
+# Optional on top of either set: the player's own data of each game, where RomM keeps play time.
+SCOPES_PLAY = {"roms.user.read", "roms.user.write"}
 CODE_CHARS = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"  # RomM's pairing alphabet
 TIMEOUT = 10
 # Decky's Python brings no certificates of its own: the system's are used to check RomM's.
@@ -276,6 +279,13 @@ SPARE = 64 * 1024 * 1024  # room left on the disk after a download
 _lock = threading.RLock()  # the games file, between the plugin and its downloads
 _saving = set()  # games whose save is being brought in step right now
 _jobs = {}  # appid -> {"state", "done", "total", "cancel"}: downloads since the plugin started
+# Downloads go one at a time, in the order they were asked for; the others wait as "queued".
+_queue = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+
+
+def _active(job):
+    """Whether a download is under way or waiting its turn."""
+    return bool(job) and job["state"] in ("queued", "downloading")
 
 
 def _home():
@@ -537,43 +547,69 @@ def _state(appid, game):
     }
     if job:
         out["job"] = {"state": job["state"], "done": job["done"], "total": job["total"]}
+    elif _kept_part(game):
+        # Paused before a restart: what was brought waits on the disk.
+        out["job"] = {"state": "paused", "done": os.path.getsize(game["part"]), "total": _number(game.get("size"))}
     sw = (game or {}).get("switching")
     if isinstance(sw, dict):
         out["switching"] = _number(sw.get("rom_id"))
     return out
 
 
-def _note_part(appid, part):
+def _note_part(appid, part, kept=False):
     """Writes down the half-done file of a download (or that there is none any more), so one
-    cut off by a restart can be cleared away later."""
+    cut off by a restart can be cleared away later. A `kept` one (paused, or cut off by RomM)
+    stays for the download to go on from where it stopped."""
     with _lock:
         data = _read_games()
         game = data["games"].get(str(appid))
-        if game is None or game.get("part") == part:
+        if game is None or (game.get("part") == part and bool(game.get("paused")) == kept):
             return
+        game.pop("paused", None)
         if part:
             game["part"] = part
+            if kept:
+                game["paused"] = True
         else:
             game.pop("part", None)
         _write_games(data)
 
 
+def _kept_part(game):
+    """The half-done file a paused download left, when it is still there as the add-on left it."""
+    part = game.get("part") if isinstance(game, dict) and game.get("paused") else None
+    if not isinstance(part, str) or not part.endswith(".part"):
+        return None
+    system_dir = os.path.join(_roms_root(), _text(game.get("system")))
+    return part if _within(part, system_dir) and os.path.isfile(part) and not os.path.islink(part) else None
+
+
+def _drop_part(game):
+    """Removes a game's half-done file and forgets it (the games file is written by the caller)."""
+    if not isinstance(game, dict):
+        return False
+    part = game.pop("part", None)
+    game.pop("paused", None)
+    if not isinstance(part, str):
+        return False
+    system_dir = os.path.join(_roms_root(), _text(game.get("system")))
+    try:
+        if part.endswith(".part") and _within(part, system_dir) and os.path.isfile(part) and not os.path.islink(part):
+            os.remove(part)
+    except OSError as e:
+        decky.logger.warning("Half-done download not removed: %s", e)
+    return True
+
+
 def _sweep_parts():
-    """Clears away the half-done files of downloads a restart cut off."""
+    """Clears away the half-done files of downloads a restart cut off; a paused one stays."""
     with _lock:
         data = _read_games()
         left = False
         for game in data["games"].values():
-            part = game.pop("part", None) if isinstance(game, dict) else None
-            if not isinstance(part, str):
+            if not isinstance(game, dict) or _kept_part(game):
                 continue
-            left = True
-            system_dir = os.path.join(_roms_root(), _text(game.get("system")))
-            try:
-                if part.endswith(".part") and _within(part, system_dir) and os.path.isfile(part) and not os.path.islink(part):
-                    os.remove(part)
-            except OSError as e:
-                decky.logger.warning("Half-done download not removed: %s", e)
+            left = _drop_part(game) or left
         if left:
             _write_games(data)
 
@@ -611,29 +647,51 @@ class _Stop(Exception):
     """A download that ends early, with the reason the page shows."""
 
 
-def _fetch(server, token, path, target, job, expected=0, check=None):
+def _fetch(server, token, path, target, job, expected=0, check=None, resume=False):
     """Streams one answer of RomM's into `target` (made new, private). Returns the bytes written;
-    raises _Stop when cancelled, stalled, refused, cut short or, with `check` (a sum's kind and
-    value), not the file RomM has."""
+    raises _Stop when cancelled or paused, stalled, refused, cut short or, with `check` (a sum's
+    kind and value), not the file RomM has. With `resume`, a `target` already there is gone on
+    from where it stops, when RomM sends just the rest; otherwise it is started again."""
     summed = hashlib.new(check[0]) if check else None
+    have = os.path.getsize(target) if resume and os.path.isfile(target) and not os.path.islink(target) else 0
     req, _, ctx = _prepare(server, "GET", path, token, accept="*/*")
+    if have:
+        req.add_header("Range", "bytes=%d-" % have)
     try:
         r = _opener(ctx).open(req, timeout=STALL)
     except urllib.error.HTTPError as e:
+        if e.code == 416 and have:
+            # Nothing left to send after what is here (or RomM will not say): started again.
+            return _fetch(server, token, path, target, job, expected, check)
         raise _Stop("refused" if e.code in (401, 403) else "game" if e.code == 404 else "unreachable")
     except (urllib.error.URLError, OSError, ValueError) as e:
         decky.logger.warning("RomM download not reached: %s", getattr(e, "reason", e))
         raise _Stop("unreachable")
     with r:
         length = _number(r.headers.get("Content-Length"))
+        # Only the rest of this very file, starting right where the half here ends, is added to it.
+        rest = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+|\*)", _text(r.headers.get("Content-Range")).strip())
+        if have and r.status == 206 and not (rest and int(rest.group(1)) == have):
+            r.close()
+            return _fetch(server, token, path, target, job, expected, check)
+        if r.status != 206:
+            have = 0  # the whole file again, from the start
+        flags = os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0) | (os.O_APPEND if have else os.O_CREAT | os.O_TRUNC)
+        written = have
+        if length:
+            length += have
         job["total"] = length or expected
-        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o644)
-        written = 0
+        job["done"] = written
         try:
-            with os.fdopen(fd, "wb") as f:
+            fd = os.open(target, flags, 0o644)
+            with os.fdopen(fd, "ab" if have else "wb") as f:
+                if summed and have:
+                    with open(target, "rb") as before:
+                        for block in iter(lambda: before.read(CHUNK), b""):
+                            summed.update(block)
                 while True:
                     if job["cancel"].is_set():
-                        raise _Stop("cancelled")
+                        raise _Stop("paused" if job.get("pause") else "cancelled")
                     try:
                         block = r.read(CHUNK)
                     except (OSError, ValueError) as e:
@@ -726,10 +784,13 @@ def _discard(files, folders, system_dir, marks=None):
                 pass
 
 
-def _download(server, token, rom, job, started=lambda part: None):
+def _download(server, token, rom, job, started=lambda part: None, resume=None):
     """Brings one game's file from RomM into RetroDECK's folder for its system. Returns what
     the games file keeps of it: {"path", "files", "folders", "size"}; raises _Stop otherwise.
-    `started` is told the half-done file's name before it is made."""
+    `started` is told the half-done file's name before it is made. `resume` is the half-done
+    file a paused download left: when it is this game's, the download goes on from there. When
+    paused (or cut off by RomM, when `resume` is not None), the half-done file stays."""
+    keep = ("paused", "unreachable") if resume is not None else ()
     system = _detail(rom)["system"]
     if not system:
         raise _Stop("system")
@@ -745,7 +806,8 @@ def _download(server, token, rom, job, started=lambda part: None):
     size = _number(rom.get("fs_size_bytes"))
     if not name or not files:
         raise _Stop("game")
-    if size + SPARE > shutil.disk_usage(system_dir).free:
+    have = os.path.getsize(resume) if resume and os.path.isfile(resume) else 0
+    if size - have + SPARE > shutil.disk_usage(system_dir).free:
         raise _Stop("space")
     path = "/api/roms/%d/content/%s" % (_number(rom.get("id")), urllib.parse.quote(name, safe=""))
     if len(files) == 1:
@@ -759,16 +821,21 @@ def _download(server, token, rom, job, started=lambda part: None):
             raise _Stop("exists")
         part = target + ".part"
         started(part)
+        stopped = None
         try:
-            written = _fetch(server, token, path, part, job, files[0][1], _expected_sum(rom))
+            written = _fetch(server, token, path, part, job, files[0][1], _expected_sum(rom), part == resume)
             if files[0][1] and written != files[0][1]:
+                os.remove(part)  # whole, but not the game's size: nothing to go on from
                 raise _Stop("unreachable")
             os.rename(part, target)
+        except _Stop as stop:
+            stopped = str(stop)
+            raise
         except OSError as e:
             decky.logger.error("Download not kept: %s", e)
             raise _Stop("disk")
         finally:
-            if os.path.lexists(part):
+            if stopped not in keep and os.path.lexists(part):
                 os.remove(part)
         return {"path": target, "files": [target], "folders": [], "size": written}
     # Several files: RomM sends an archive, with a playlist when the game has discs. They go into
@@ -778,15 +845,24 @@ def _download(server, token, rom, job, started=lambda part: None):
         raise _Stop("exists")
     part = folder + ".zip.part"
     started(part)
+    stopped = None
     try:
-        _fetch(server, token, path, part, job)
+        _fetch(server, token, path, part, job, resume=part == resume)
+        with _lock:
+            # Unpacking is not paused: a pause asked for just now stops here, with the archive whole.
+            job["unpacking"] = True
+            if job.get("pause"):
+                raise _Stop("paused")
         os.mkdir(folder)
         made = _unzip(part, folder, system_dir, job)
+    except _Stop as stop:
+        stopped = str(stop)
+        raise
     except OSError as e:
         decky.logger.error("Download not kept: %s", e)
         raise _Stop("disk")
     finally:
-        if os.path.lexists(part):
+        if stopped not in keep and os.path.lexists(part):
             os.remove(part)
     if not made:
         _discard([], [folder], system_dir)
@@ -794,6 +870,49 @@ def _download(server, token, rom, job, started=lambda part: None):
     lists = [f for f in made if f.lower().endswith(".m3u")]
     start = lists[0] if len(lists) == 1 else max(made, key=os.path.getsize)
     return {"path": start, "files": made, "folders": [folder], "size": sum(os.path.getsize(f) for f in made)}
+
+
+def _library(server, key):
+    """Every game RomM has, by its number: ({rom_id: game}, None), or (None, why) when RomM did not
+    answer every page. Past the most pages ever asked for, what came so far, with "partial"."""
+    every, offset = {}, 0
+    for _ in range(LIBRARY_PAGES):
+        path = ("/api/roms?limit=%d&offset=%d&order_by=name&order_dir=asc&with_char_index=false"
+                "&with_filter_values=false&with_rom_id_index=false&with_total=false" % (LIBRARY_PAGE, offset))
+        status, reply = _request(server, "GET", path, key["token"])
+        if status == 401:
+            _forget_key()
+        if status in (401, 403):
+            return None, "refused"
+        items = reply.get("items") if isinstance(reply, dict) else None
+        if status != 200 or not isinstance(items, list):
+            return None, "unreachable"
+        for rom in items:
+            if isinstance(rom, dict) and _number(rom.get("id")) > 0:
+                every[_number(rom["id"])] = rom
+        if len(items) < LIBRARY_PAGE:
+            return every, None
+        offset += LIBRARY_PAGE
+    return every, "partial"
+
+
+def _gone(server, key, games):
+    """The entries whose game RomM no longer has: ([appid], None), or (None, why). A game missing
+    from the list is asked for by itself too, and only RomM saying it is not there counts."""
+    every, why = _library(server, key)
+    if why:
+        return None, "unreachable" if why == "partial" else why
+    gone = []
+    for appid, game in games.items():
+        rom_id = _number(game.get("rom_id")) if isinstance(game, dict) else 0
+        if not rom_id or rom_id in every:
+            continue
+        status, _ = _request(server, "GET", "/api/roms/%d" % rom_id, key["token"])
+        if status == 404:
+            gone.append(_number(appid))
+        elif status != 200:
+            return None, "refused" if status in (401, 403) else "unreachable"
+    return sorted(gone), None
 
 
 def _stands_for_its_versions(rom):
@@ -1527,6 +1646,72 @@ def _collections(server, key):
     return out[:COLLECTIONS_MAX], None
 
 
+# ── Play time ─────────────────────────────────────────────────────────────────────
+# Each time a game is played from its entry, the session goes to RomM (its start, its end and the
+# time played, which leaves out the Deck's sleep). Sessions wait on the Deck while RomM does not
+# answer or the key may not write them, and go once it does.
+PLAY_FILE = os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "play.json")
+PLAY_MOST = 1000  # sessions kept waiting at most: the oldest go first
+PLAY_BATCH = 100  # RomM takes at most this many at a time
+PLAY_SHORTEST = 60  # seconds: a shorter one (a start that failed) is not kept
+_playing = {}  # appid -> (rom_id, when it started, monotonic clock then)
+_play_lock = threading.Lock()
+
+
+def _iso(seconds):
+    return datetime.datetime.fromtimestamp(seconds, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _read_play():
+    try:
+        with open(PLAY_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        sessions = data.get("sessions") if isinstance(data, dict) else None
+        return [s for s in sessions if isinstance(s, dict)] if isinstance(sessions, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+def _play_key():
+    """(server, key) when the stored key is for this server and may write play time, else (None, why)."""
+    key = _read_key()
+    server = _server()
+    if not key:
+        return None, "unlinked"
+    if not server or key["url"] != server["url"]:
+        return None, "moved"
+    if "roms.user.write" not in _key_scopes(key):
+        return None, "limited"
+    return server, key
+
+
+def _play_keep(session):
+    with _play_lock:
+        waiting = (_read_play() + [session])[-PLAY_MOST:]
+        return _write_private(PLAY_FILE, {"sessions": waiting})
+
+
+def _play_send():
+    """Sends the sessions waiting, when the key may. Returns how many still wait."""
+    server, key = _play_key()
+    with _play_lock:
+        waiting = _read_play()
+        if not server:
+            return len(waiting)
+        while waiting:
+            batch = waiting[:PLAY_BATCH]
+            status, reply = _request(server, "POST", "/api/play-sessions", key["token"], {"sessions": batch})
+            if status in (400, 422):
+                # Never going to be taken: not kept waiting for ever.
+                decky.logger.warning("RomM refused %d play sessions", len(batch))
+            elif status not in (200, 201) or not isinstance(reply, dict):
+                break  # asleep, unreachable or not allowed: they wait
+            waiting = waiting[PLAY_BATCH:]
+            if not _write_private(PLAY_FILE, {"sessions": waiting}):
+                break
+        return len(waiting)
+
+
 class Plugin:
     async def romm_status(self):
         """"linked" (a key for RomM's address that may look after games), "limited" (the same,
@@ -1616,7 +1801,7 @@ class Plugin:
                 await loop.run_in_executor(None, _request, server, "DELETE", "/api/client-tokens/%d" % token_id, token)
 
         # Less than the pair it always needs, or more than Vistazo should ever hold: not kept.
-        extra = scopes - SCOPES_GAMES
+        extra = scopes - SCOPES_GAMES - SCOPES_PLAY
         if extra or not scopes >= SCOPES:
             await revoke()
             return "scopes", SCOPES - scopes, extra
@@ -1733,25 +1918,9 @@ class Plugin:
         if not server:
             return {"ok": False, "why": key}
         language = _text(language).strip().lower()[:40]
-        loop = asyncio.get_running_loop()
-        every, offset = {}, 0
-        for _ in range(LIBRARY_PAGES):
-            path = ("/api/roms?limit=%d&offset=%d&order_by=name&order_dir=asc&with_char_index=false"
-                    "&with_filter_values=false&with_rom_id_index=false&with_total=false" % (LIBRARY_PAGE, offset))
-            status, reply = await loop.run_in_executor(None, _request, server, "GET", path, key["token"])
-            if status == 401:
-                _forget_key()
-            if status in (401, 403):
-                return {"ok": False, "why": "refused"}
-            items = reply.get("items") if isinstance(reply, dict) else None
-            if status != 200 or not isinstance(items, list):
-                return {"ok": False, "why": "unreachable"}
-            for rom in items:
-                if isinstance(rom, dict) and _number(rom.get("id")) > 0:
-                    every[_number(rom["id"])] = rom
-            if len(items) < LIBRARY_PAGE:
-                break
-            offset += LIBRARY_PAGE
+        every, why = await asyncio.get_running_loop().run_in_executor(None, _library, server, key)
+        if every is None:
+            return {"ok": False, "why": why}
         games = []
         for group in _version_groups(every):
             roms = [every[i] for i in group]
@@ -1847,7 +2016,7 @@ class Plugin:
         if not game:
             return {"state": "game"}
         job = _jobs.get(appid)
-        if job and job["state"] == "downloading":
+        if _active(job):
             return {"state": "busy"}
         if appid in _saving:
             return {"state": "busy"}
@@ -2036,7 +2205,7 @@ class Plugin:
                 dup = None
             for n in ([own] if dup is not None else []):
                 job = _jobs.get(n)
-                if job and job["state"] == "downloading":
+                if _active(job):
                     return {"ok": False, "why": "busy"}
             t_path, t_files, t_folders = None, [], []
             if detail["system"]:
@@ -2069,7 +2238,7 @@ class Plugin:
                 "from": "tender",
             }
             if dup is not None:
-                games.pop(str(own), None)
+                _drop_part(games.pop(str(own), None))  # a paused download of it goes too
                 _jobs.pop(own, None)
             if not _write_games(data):
                 return {"ok": False, "why": "disk"}
@@ -2081,7 +2250,7 @@ class Plugin:
         appid = _number(appid)
         with _lock:
             job = _jobs.get(appid)
-            if job and job["state"] == "downloading":
+            if _active(job):
                 return {"ok": False, "why": "busy"}
             data = _read_games()
             game = data["games"].pop(str(appid), None)
@@ -2089,12 +2258,15 @@ class Plugin:
                 return {"ok": False, "why": "game"}
             if not _write_games(data):
                 return {"ok": False, "why": "disk"}
+            # A paused download's half-done file would be nobody's once the entry is gone.
+            _drop_part(game)
             _jobs.pop(appid, None)
             before = game.get("before") if isinstance(game.get("before"), dict) else {}
             return {"ok": True, **{k: _text(before.get(k)) for k in ("exe", "start_dir", "options")}}
 
     async def game_download(self, appid):
-        """Starts bringing this game's file from RomM; game_state tells how it goes."""
+        """Starts bringing this game's file from RomM, or puts it in the queue while another one
+        comes; a paused one goes on from where it stopped. game_state tells how it goes."""
         appid = _number(appid)
         server, key = _games_key()
         if not server:
@@ -2104,22 +2276,37 @@ class Plugin:
             if not game:
                 return {"ok": False, "why": "game"}
             job = _jobs.get(appid)
-            if job and job["state"] == "downloading":
+            if _active(job):
                 return {"ok": True, **_state(appid, game)}
             if game.get("installed") and os.path.isfile(str(game.get("path") or "")):
                 return {"ok": True, **_state(appid, game)}
-            job = {"state": "downloading", "done": 0, "total": _number(game.get("size")), "cancel": threading.Event()}
+            resume = _kept_part(game) or ""
+            done = os.path.getsize(resume) if resume else 0
+            job = {"state": "queued", "done": done, "total": _number(game.get("size")), "cancel": threading.Event()}
             _jobs[appid] = job
         rom_id = _number(game.get("rom_id"))
 
+        def started(part):
+            job["part"] = part
+            _note_part(appid, part)
+
         def run():
+            with _lock:
+                if job["cancel"].is_set():  # paused or cancelled while it waited its turn
+                    job["state"] = "paused" if job.get("pause") else "cancelled"
+                    return
+                job["state"] = "downloading"
             try:
                 rom, why = _rom(server, key, rom_id)
                 if not rom:
                     raise _Stop(why)
-                got = _download(server, key["token"], rom, job, lambda part: _note_part(appid, part))
+                got = _download(server, key["token"], rom, job, started, resume)
             except _Stop as stop:
-                _note_part(appid, None)
+                part = job.get("part")
+                if not (part and str(stop) in ("paused", "unreachable") and os.path.isfile(part)):
+                    part = None
+                if part or job.get("part"):
+                    _note_part(appid, part, kept=True)
                 job["state"] = str(stop)
                 return
             except Exception as e:  # never leave a download hanging in "downloading"
@@ -2135,27 +2322,59 @@ class Plugin:
                     job["state"] = "cancelled"
                     return
                 kept.pop("part", None)
+                kept.pop("paused", None)
                 kept.update(path=got["path"], files=got["files"], folders=got["folders"], size=got["size"], installed=True,
                             marks={f: _mark(f) for f in got["files"] if os.path.isfile(f)})
                 job["state"] = "installed" if _write_games(data) else "disk"
 
-        asyncio.get_running_loop().run_in_executor(None, run)
+        _queue.submit(run)
         return {"ok": True, **_state(appid, game)}
 
-    async def game_cancel(self, appid):
+    async def game_pause(self, appid):
+        """Pauses this game's download (or takes it out of the queue): what was brought stays on
+        the disk, and game_download goes on from there. A version being brought and a download
+        being unpacked are not paused."""
         appid = _number(appid)
-        job = _jobs.get(appid)
-        if job and job["state"] == "downloading":
-            job["cancel"].set()
         with _lock:
+            job = _jobs.get(appid)
+            game = _read_games()["games"].get(str(appid))
+            if not _active(job) or job.get("to") or job.get("unpacking"):
+                return {"ok": False, "why": "busy" if _active(job) else "game", **_state(appid, game)}
+            job["pause"] = True
+            job["cancel"].set()
+            if job["state"] == "queued":
+                job["state"] = "paused"
+            return {"ok": True, **_state(appid, game)}
+
+    async def game_cancel(self, appid):
+        """Stops this game's download and throws away what it brought, paused or not."""
+        appid = _number(appid)
+        with _lock:
+            job = _jobs.get(appid)
+            if _active(job):
+                job["pause"] = False
+                job["cancel"].set()
+                if job["state"] == "queued":
+                    job["state"] = "cancelled"  # it never starts
             data = _read_games()
             game = data["games"].get(str(appid))
+            changed = False
             # A new version already here and waiting: taken away, the entry stays as it was.
             if game and isinstance(game.get("switching"), dict):
                 _drop_switch(game)
-                _write_games(data)
+                changed = True
                 if job and job["state"] == "ready":
                     job["state"] = "cancelled"
+            # A paused one: what it brought goes.
+            if game and not _active(job) and game.get("part"):
+                _drop_part(game)
+                changed = True
+                if job and job["state"] in ("paused", "unreachable"):
+                    job["state"] = "cancelled"
+            elif job and job["state"] == "paused":
+                job["state"] = "cancelled"  # paused while it waited its turn: nothing came yet
+            if changed:
+                _write_games(data)
         return await self.game_state(appid)
 
     async def game_remove(self, appid):
@@ -2163,7 +2382,7 @@ class Plugin:
         appid = _number(appid)
         with _lock:
             job = _jobs.get(appid)
-            if job and job["state"] == "downloading":
+            if _active(job):
                 return {"ok": False, "why": "busy"}
             data = _read_games()
             game = data["games"].get(str(appid))
@@ -2257,8 +2476,12 @@ class Plugin:
             job = _jobs.get(appid)
             if not kept or _number(kept.get("rom_id")) != current:
                 return {"ok": False, "why": "game"}
-            if (job and job["state"] == "downloading") or appid in _saving or isinstance(kept.get("switching"), dict):
+            if _active(job) or appid in _saving or isinstance(kept.get("switching"), dict):
                 return {"ok": False, "why": "busy"}
+            # A paused download of the version it starts now is of no use after the switch.
+            _drop_part(kept)
+            if job and job["state"] in ("paused", "unreachable"):
+                _jobs.pop(appid, None)
             installed = bool(kept.get("installed") and os.path.isfile(_text(kept.get("path"))))
             there = _already_there(other)
             target = {"rom_id": rom_id, "platform": _text(other.get("platform_slug")), "size": detail["size"]}
@@ -2274,10 +2497,15 @@ class Plugin:
             kept.pop("switching", None)
             if not _write_games(data):
                 return {"ok": False, "why": "disk"}
-            job = {"state": "downloading", "done": 0, "total": detail["size"], "cancel": threading.Event(), "to": rom_id}
+            job = {"state": "queued", "done": 0, "total": detail["size"], "cancel": threading.Event(), "to": rom_id}
             _jobs[appid] = job
 
         def run():
+            with _lock:
+                if job["cancel"].is_set():  # cancelled while it waited its turn
+                    job["state"] = "cancelled"
+                    return
+                job["state"] = "downloading"
             try:
                 got = _download(server, key["token"], other, job, lambda part: _note_part(appid, part))
             except _Stop as stop:
@@ -2308,7 +2536,7 @@ class Plugin:
                     return
                 job["state"] = "ready"
 
-        loop.run_in_executor(None, run)
+        _queue.submit(run)
         with _lock:
             return {"ok": True, "pending": rom_id, **_state(appid, _read_games()["games"].get(str(appid)))}
 
@@ -2336,6 +2564,51 @@ class Plugin:
             games = _read_games()["games"]
         return {a: _number(g["switching"].get("rom_id")) for a, g in games.items()
                 if isinstance(g, dict) and isinstance(g.get("switching"), dict)}
+
+    async def game_gone(self):
+        """The add-on's entries whose game was deleted in RomM: {"ok": True, "apps": [appid]}."""
+        server, key = _games_key()
+        if not server:
+            return {"ok": False, "why": key}
+        with _lock:
+            games = dict(_read_games()["games"])
+        gone, why = await asyncio.get_running_loop().run_in_executor(None, _gone, server, key, games)
+        return {"ok": True, "apps": gone} if gone is not None else {"ok": False, "why": why}
+
+    async def play_started(self, appid):
+        """One of the add-on's games started: its session begins now."""
+        appid = _number(appid)
+        with _lock:
+            game = _read_games()["games"].get(str(appid))
+        rom_id = _number((game or {}).get("rom_id")) if isinstance(game, dict) else 0
+        if not rom_id:
+            return {"ok": False, "why": "game"}
+        _playing[appid] = (rom_id, time.time(), time.monotonic())
+        return {"ok": True}
+
+    async def play_ended(self, appid):
+        """The game closed: its session is kept and sent to RomM when it may be. Answers {"ok",
+        "kept" (False for one too short to count), "waiting" (sessions not sent yet)}."""
+        started = _playing.pop(_number(appid), None)
+        if not started:
+            return {"ok": False, "why": "game"}
+        rom_id, began, clock = started
+        played = time.monotonic() - clock  # the Deck's sleep is not counted
+        if played < PLAY_SHORTEST:
+            return {"ok": True, "kept": False}
+        # The clock may have been set meanwhile: the end never comes before the start.
+        ended = max(time.time(), began + played)
+        session = {"rom_id": rom_id, "start_time": _iso(began), "end_time": _iso(ended), "duration_ms": int(played * 1000)}
+        loop = asyncio.get_running_loop()
+        if not await loop.run_in_executor(None, _play_keep, session):
+            return {"ok": False, "why": "disk"}
+        return {"ok": True, "kept": True, "waiting": await loop.run_in_executor(None, _play_send)}
+
+    async def play_state(self):
+        """Whether play time reaches RomM with this key, and how many sessions wait: {"allowed", "waiting"}."""
+        server, _ = _play_key()
+        waiting = await asyncio.get_running_loop().run_in_executor(None, _play_send)
+        return {"allowed": bool(server), "waiting": waiting}
 
     async def _main(self):
         _move_in()

@@ -43,6 +43,9 @@ export const tenderGames = callable<[], TenderGame[]>("tender_games");
 const adopt = callable<[appid: number, romId: number, exe: string, dir: string, options: string, own: number], GameState & { dropped?: number }>("game_adopt");
 const download = callable<[appid: number], GameState>("game_download");
 const cancel = callable<[appid: number], GameState>("game_cancel");
+const pause = callable<[appid: number], GameState>("game_pause");
+// A download under way or waiting its turn.
+export const busyJob = (s: GameState | null | undefined) => ["queued", "downloading"].includes(s?.job?.state ?? "");
 const remove = callable<[appid: number], GameState>("game_remove");
 export const gameState = callable<[appid: number], GameState>("game_state");
 // A game's save against RomM's, and the files its console needs.
@@ -81,6 +84,8 @@ export function loadOwned(again = false): Promise<void> {
       changed();
       mend();
       finishPending();
+      // Play time that could not go before (RomM asleep) goes now.
+      playState().catch(() => undefined);
     })
     .catch((e) => {
       loaded = null;
@@ -256,6 +261,30 @@ export async function clearLostOwn(): Promise<string | null> {
   changed();
   return why;
 }
+
+// Entries whose game was deleted in RomM: shown in the settings, and taken away only when the
+// player says so (as removing an entry does: the files the add-on brought go, saves stay).
+const gone = callable<[], Reply & { apps: number[] }>("game_gone");
+// Asking means reading RomM's whole list: not more than once in a while.
+const GONE_GOOD = 10 * 60 * 1000;
+let goneAsked: { at: number; apps: Promise<number[]> } | null = null;
+export function goneOwn(anew = false): Promise<number[]> {
+  if (anew || !goneAsked || Date.now() - goneAsked.at > GONE_GOOD)
+    goneAsked = { at: Date.now(), apps: gone().then((g) => (g?.ok ? g.apps : [])).catch(() => [] as number[]) };
+  return goneAsked.apps.then((apps) => apps.filter((a) => owned.has(a)));
+}
+export async function clearGone(appids: number[]): Promise<string | null> {
+  let why: string | null = null;
+  for (const appid of appids) why = (await removeOwn(appid)) ?? why;
+  await wait(1500);
+  await tidyCollections().catch((e) => console.warn("[Vistazo RomM] collections", e));
+  return why;
+}
+
+// Play time: each session of one of its games goes to RomM (the backend keeps it until it can).
+export const playStarted = callable<[appid: number], Reply>("play_started");
+export const playEnded = callable<[appid: number], Reply & { kept?: boolean; waiting?: number }>("play_ended");
+export const playState = callable<[], { allowed: boolean; waiting: number }>("play_state");
 
 // Entries made before the launcher moved (it used to live in Vistazo's own folder) are pointed
 // at where it is now. Setting the same values again changes nothing.
@@ -495,7 +524,7 @@ export async function switchVersion(appid: number, romId: number): Promise<strin
     await wait(1000);
     const s = await gameState(appid).catch(() => null);
     if (!s && tries > 60) return "unreachable";
-    if (!s || s.job?.state === "downloading") continue;
+    if (!s || busyJob(s)) continue;
     if (s.switching !== romId) return s.job?.state && !["installed", "ready"].includes(s.job.state) ? s.job.state : "error";
     return finishWhenClosed(appid);
   }
@@ -513,7 +542,7 @@ export async function dropNotInstalled(): Promise<string | null> {
   let why: string | null = null;
   for (const appid of ownedApps()) {
     const state = await gameState(appid).catch(() => null);
-    if (!state || state.installed || state.job?.state === "downloading") continue;
+    if (!state || state.installed || busyJob(state)) continue;
     why = (await removeOwn(appid)) ?? why;
   }
   // Steam takes a moment to drop the entries from their collections.
@@ -532,6 +561,13 @@ export async function uninstallOwn(appid: number): Promise<string | null> {
 
 export const retryOwn = (appid: number) => download(appid).catch(() => null);
 export const cancelOwn = (appid: number) => cancel(appid).catch(() => null);
+// Pauses a download: what came stays, and downloading again goes on from there. One that cannot
+// be paused (a version being brought, or being unpacked) is stopped instead.
+export async function pauseOwn(appid: number) {
+  const s = await pause(appid).catch(() => null);
+  if (!s?.ok && busyJob(s)) await cancelOwn(appid);
+  return s;
+}
 
 // Takes the add-on's entry away: the files it brought, its record and the Steam entry. A file
 // that was already there (another program's) stays.
@@ -539,7 +575,7 @@ export async function removeOwn(appid: number): Promise<string | null> {
   // Never from under a game that is being played.
   if (isRunning(appid)) return "running";
   let state = await cancel(appid).catch(() => null);
-  for (let i = 0; i < 50 && state?.job?.state === "downloading"; i++) {
+  for (let i = 0; i < 50 && busyJob(state); i++) {
     await wait(100);
     state = await gameState(appid).catch(() => null);
   }

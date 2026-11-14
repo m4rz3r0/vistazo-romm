@@ -1,7 +1,7 @@
 import { ButtonItem, ConfirmModal, DropdownItem, PanelSection, PanelSectionRow, TextField, ToggleField, showModal } from "@decky/ui";
 import { useCallback, useEffect, useState } from "react";
 import { t } from "./i18n";
-import { GameState, RommCollection, Version, gameVersions, running, switchVersion, TenderGame, addOwn, rommCollections, turnCollection, giveBackTender, takeOverTender, tenderGames, tenderOn, clearLostOwn, dropNotInstalled, gameState, loadOwned, lostOwn, onOwnChange, ownedApp, ownedRom, removeOwn, retryOwn, syncLibrary } from "./own";
+import { GameState, RommCollection, Version, busyJob, cancelOwn, clearGone, goneOwn, pauseOwn, playState, gameVersions, running, switchVersion, TenderGame, addOwn, rommCollections, turnCollection, giveBackTender, takeOverTender, tenderGames, tenderOn, clearLostOwn, dropNotInstalled, gameState, loadOwned, lostOwn, onOwnChange, ownedApp, ownedRom, removeOwn, retryOwn, syncLibrary } from "./own";
 import { openGame } from "./page";
 import { PairAnswer, RommHealth, ServerAnswer, checkRomm, pairRomm, rommServer, setRommServer, unlinkRomm, useRomm } from "./romm";
 import { LANGUAGES, setOwnGames, setPreferredLanguage, setSyncSaves, useOwnGames, usePreferredLanguage, useSyncSaves } from "./settings";
@@ -32,6 +32,8 @@ export function Settings() {
       {games && <CollectionsRow />}
       {games && <OwnRow />}
       {games && <LostRow />}
+      {games && <GoneRow />}
+      {games && <PlayRow />}
     </PanelSection>
   );
 }
@@ -184,7 +186,7 @@ function VersionRow({ appid, state, onDone }: { appid: number; state: GameState 
   const mine = list.find((v) => v.current);
   const current = mine?.rom_id ?? 0;
   const job = state?.job;
-  const bringing = busy && job?.state === "downloading";
+  const bringing = busy && busyJob(state);
   const change = (romId: number) => {
     if (romId === current) return;
     if (running(appid)) return setSaid(t.ownWhy("running"));
@@ -208,7 +210,7 @@ function VersionRow({ appid, state, onDone }: { appid: number; state: GameState 
               ? t.versionWaiting
             : (said ?? (mine && !mine.achievements ? `${t.versionNoAchievements} ${t.versionDesc}` : t.versionDesc))
         }
-        disabled={busy || job?.state === "downloading" || !!state?.switching}
+        disabled={busy || busyJob(state) || !!state?.switching}
         rgOptions={list.map((v) => ({ data: v.rom_id, label: versionName(v, list) }))}
         selectedOption={current}
         onChange={(o) => change(Number(o.data))}
@@ -558,6 +560,69 @@ function LostRow() {
   );
 }
 
+// Games of Vistazo's that were deleted in RomM: one row, only while there are any. RomM is asked
+// each time the settings open; removing the entries asks first, as it takes them out of Steam.
+function GoneRow() {
+  const [gone, setGone] = useState<number[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [why, setWhy] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    loadOwned()
+      .then(() => goneOwn())
+      .then((apps) => alive && setGone(apps));
+    return () => {
+      alive = false;
+    };
+  }, []);
+  if (!gone.length) return null;
+  const names = gone.map((a) => String(appStore.GetAppOverviewByAppID(a)?.display_name ?? a)).join(", ");
+  return (
+    <PanelSectionRow>
+      <ButtonItem
+        layout="below"
+        label={t.ownGone(gone.length)}
+        description={why ? t.ownWhy(why) : t.ownGoneDesc}
+        disabled={busy}
+        onClick={() =>
+          showModal(
+            <ConfirmModal
+              strTitle={t.ownGoneAsk}
+              strDescription={t.ownGoneAskDesc(names)}
+              strOKButtonText={t.ownGoneClear}
+              onOK={() => {
+                setBusy(true);
+                clearGone(gone).then((w) => {
+                  setWhy(w);
+                  setBusy(false);
+                  goneOwn(true).then(setGone);
+                });
+              }}
+            />,
+          )
+        }
+      >
+        {t.ownGoneClear}
+      </ButtonItem>
+    </PanelSectionRow>
+  );
+}
+
+// Play time goes to RomM only with a key that may write it: said once, while it may not.
+function PlayRow() {
+  const status = useRomm();
+  const [allowed, setAllowed] = useState(true);
+  useEffect(() => {
+    if (status === "linked") playState().then((p) => setAllowed(!!p?.allowed)).catch(() => undefined);
+  }, [status]);
+  if (status !== "linked" || allowed) return null;
+  return (
+    <PanelSectionRow>
+      <div style={{ fontSize: 12, lineHeight: 1.45, opacity: 0.7 }}>{t.playLimited}</div>
+    </PanelSectionRow>
+  );
+}
+
 // The game whose page is open, handed to Vistazo or taken back. Vistazo makes a second entry of
 // its own in Steam for it (Tender keeps the one it made) and brings its file; one row says how
 // that goes and holds the one thing to do next.
@@ -607,18 +672,25 @@ function OwnRow() {
     });
   };
   const job = state?.job?.state;
-  const failed = !!job && !["downloading", "installed", "cancelled"].includes(job);
+  const share = state?.job?.total ? Math.floor((100 * state.job.done) / state.job.total) : 0;
+  const failed = !!job && !["queued", "downloading", "paused", "installed", "cancelled"].includes(job);
+  // What a stopped download left on the disk, to go on from or throw away.
+  const half = !!state && !state.installed && (job === "paused" || (failed && !!state.job?.done));
   const description = why
     ? t.ownWhy(why)
     : !appid
       ? t.ownOffer
-      : job === "downloading"
-        ? t.ownDownloading(state?.job?.total ? Math.floor((100 * state.job.done) / state.job.total) : 0)
-        : state?.installed
-          ? t.ownReady
-          : failed
-            ? t.ownWhy(job)
-            : t.ownNoFile;
+      : job === "queued"
+        ? t.ownQueued
+        : job === "downloading"
+          ? t.ownDownloading(share)
+          : state?.installed
+            ? t.ownReady
+            : job === "paused"
+              ? t.ownPaused(share)
+              : failed
+                ? t.ownWhy(job)
+                : t.ownNoFile;
   return (
     <>
       <PanelSectionRow>
@@ -633,10 +705,24 @@ function OwnRow() {
         </ButtonItem>
       </PanelSectionRow>
       {!!appid && <VersionRow appid={appid} state={state} onDone={() => setTick((n) => n + 1)} />}
-      {!!appid && !!state && !state.installed && job !== "downloading" && (
+      {!!appid && busyJob(state) && !state?.switching && (
+        <PanelSectionRow>
+          <ButtonItem layout="below" disabled={busy} onClick={() => act(() => pauseOwn(appid).then(() => null))}>
+            {t.ownPause}
+          </ButtonItem>
+        </PanelSectionRow>
+      )}
+      {!!appid && !!state && !state.installed && !busyJob(state) && (
         <PanelSectionRow>
           <ButtonItem layout="below" disabled={busy} onClick={() => act(() => retryOwn(appid).then(() => null))}>
-            {t.ownDownload}
+            {half ? t.ownResume : t.ownDownload}
+          </ButtonItem>
+        </PanelSectionRow>
+      )}
+      {!!appid && half && (
+        <PanelSectionRow>
+          <ButtonItem layout="below" disabled={busy} onClick={() => act(() => cancelOwn(appid).then(() => null))}>
+            {t.ownDiscard}
           </ButtonItem>
         </PanelSectionRow>
       )}
