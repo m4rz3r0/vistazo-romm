@@ -178,6 +178,19 @@ const es = {
   ownDownloading: (p: number) => `Descargando: ${p} %`,
   ownReady: "Listo: está en la estantería Retro, con un ojo en la esquina, y en tu biblioteca.",
   ownNoFile: "La entrada está creada, pero falta el juego.",
+  // SteamGridDB: pictures RomM lacks, with the player's own key.
+  sgdbLabel: "Imágenes de SteamGridDB",
+  sgdbOff: "Completa las imágenes que falten en RomM. Necesita tu propia clave de SteamGridDB.",
+  sgdbOn: "Activo: completa las imágenes que falten. Solo se envía el nombre del juego.",
+  sgdbRefused: "SteamGridDB ya no acepta la clave: pon otra.",
+  sgdbAdd: "Poner clave",
+  sgdbAgain: "Poner otra clave",
+  sgdbRemove: "Quitar",
+  sgdbSteps: "Tu clave está en steamgriddb.com, en Preferencias › API.",
+  sgdbField: "Clave",
+  sgdbKeep: "Guardar",
+  sgdbAnswer: (a: string): string =>
+    a === "ok" ? "Guardada." : a === "invalid" ? "Eso no parece una clave de SteamGridDB." : "No se pudo guardar.",
   ownWhy: (why: string) =>
     (({
       unreachable: "RomM no responde o la descarga se cortó. Prueba otra vez.",
@@ -366,6 +379,19 @@ const en: typeof es = {
   ownDownloading: (p: number) => `Downloading: ${p}%`,
   ownReady: "Ready: it is on the Retro shelf, with an eye in its corner, and in your library.",
   ownNoFile: "The entry is there, but the game is missing.",
+  // SteamGridDB: pictures RomM lacks, with the player's own key.
+  sgdbLabel: "Pictures from SteamGridDB",
+  sgdbOff: "Fills in the pictures RomM lacks. It needs your own SteamGridDB key.",
+  sgdbOn: "On: it fills in the pictures that are missing. Only the game's name is sent.",
+  sgdbRefused: "SteamGridDB no longer takes the key: add another one.",
+  sgdbAdd: "Add key",
+  sgdbAgain: "Add another key",
+  sgdbRemove: "Remove",
+  sgdbSteps: "Your key is on steamgriddb.com, under Preferences › API.",
+  sgdbField: "Key",
+  sgdbKeep: "Save",
+  sgdbAnswer: (a: string): string =>
+    a === "ok" ? "Saved." : a === "invalid" ? "That does not look like a SteamGridDB key." : "It could not be saved.",
   ownWhy: (why: string) =>
     (({
       unreachable: "RomM is not answering or the download was cut short. Try again.",

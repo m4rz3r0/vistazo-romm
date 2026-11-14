@@ -585,6 +585,143 @@ def _resource(server, key, path, most):
     return (raw, kind) if kind else None
 
 
+# ── SteamGridDB: the pictures RomM lacks, for those who give their own key ───────────
+# Off until the player pastes their own SteamGridDB key. It only fills gaps: a kind RomM keeps is
+# never asked for, and the page asks only for what the Steam entry lacks. Only the game's name
+# goes out, and only to SteamGridDB's API over HTTPS; the key goes nowhere else, is kept for this
+# user only and is never logged or handed back. A name that matches no game, or more than one,
+# brings nothing: no picture is better than another game's.
+SGDB_FILE = os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "steamgriddb.json")
+SGDB_API = "https://www.steamgriddb.com/api/v2"
+# Where its pictures are served from; they are fetched without the key.
+SGDB_IMAGES = ("https://cdn2.steamgriddb.com/", "https://cdn.steamgriddb.com/")
+SGDB_ICONS = os.path.join(decky.DECKY_PLUGIN_RUNTIME_DIR, "icons")
+SGDB_KEY_SHAPE = re.compile(r"[A-Za-z0-9]{16,128}")
+SGDB_PLAIN = {"types": "static", "nsfw": "false", "humor": "false", "epilepsy": "false", "limit": "5"}
+# Each kind of the entry: the API's list and its filters (sizes as Steam shows them).
+SGDB_KINDS = {
+    "cover": ("grids", {"dimensions": "600x900", "mimes": "image/png,image/jpeg"}),
+    "wide": ("grids", {"dimensions": "920x430", "mimes": "image/png,image/jpeg"}),
+    "hero": ("heroes", {"dimensions": "1920x620,3840x1240,1600x650", "mimes": "image/png,image/jpeg"}),
+    "logo": ("logos", {"mimes": "image/png"}),
+    "icon": ("icons", {"mimes": "image/png"}),
+}
+_sgdb_ids = {}  # name as compared -> SteamGridDB's game id, or None when unsure
+_sgdb_refused = [False]  # whether SteamGridDB turned the key down since it was kept
+
+
+def _sgdb_key():
+    try:
+        with open(SGDB_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    key = data.get("key") if isinstance(data, dict) else None
+    return key if isinstance(key, str) and SGDB_KEY_SHAPE.fullmatch(key) else None
+
+
+def _sgdb_name(name):
+    """A name as compared: no accents, case or punctuation."""
+    import unicodedata
+    text = unicodedata.normalize("NFKD", _text(name)).replace("&", " and ")
+    return "".join(c for c in text.casefold() if c.isalnum())
+
+
+def _sgdb_match(name, results):
+    """SteamGridDB's id of the one game named exactly `name`; None when there is none or more than one."""
+    want = _sgdb_name(name)
+    ids = {_number(r.get("id")) for r in results if isinstance(r, dict) and _sgdb_name(r.get("name")) == want} if want else set()
+    ids.discard(0)
+    return ids.pop() if len(ids) == 1 else None
+
+
+def _romm_has(rom, kind):
+    """Whether RomM keeps a picture of this kind for the game: then SteamGridDB is never asked for it."""
+    if kind == "cover":
+        path = _text(rom.get("path_cover_large")).split("?")[0]
+        rest = path[len(COVERS):] if path.startswith(COVERS) else ""
+    else:
+        ss = rom.get("ss_metadata") if isinstance(rom.get("ss_metadata"), dict) else {}
+        rest = next((_text(ss.get(f)).split("?")[0].lstrip("/") for f in PICTURES.get(kind, ()) if _text(ss.get(f))), "")
+    return bool(rest) and all(p not in ("", ".", "..") for p in rest.split("/"))
+
+
+def _sgdb_get(key, path, query=None):
+    """One call to SteamGridDB's API: (status, parsed JSON or None); 0 when it could not be reached."""
+    req, _, ctx = _prepare({"url": SGDB_API}, "GET", path + ("?" + urllib.parse.urlencode(query) if query else ""), key)
+    try:
+        with _opener(ctx).open(req, timeout=TIMEOUT) as r:
+            return r.status, json.loads(r.read(2 * 1024 * 1024) or b"null")
+    except urllib.error.HTTPError as e:
+        return e.code, None
+    except (urllib.error.URLError, OSError, ValueError):
+        return 0, None
+
+
+def _sgdb_image(url):
+    """A picture from SteamGridDB's own image servers, fetched without the key: (bytes, kind) or None."""
+    if not isinstance(url, str) or not url.startswith(SGDB_IMAGES) or any(c.isspace() for c in url):
+        return None
+    req = urllib.request.Request(url, method="GET")
+    req.add_header("Accept", "image/*")
+    req.add_header("User-Agent", "Vistazo")
+    ctx = ssl.create_default_context(cafile=next((f for f in CA_FILES if os.path.isfile(f)), None)) if url.startswith("https:") else None
+    try:
+        with _opener(ctx).open(req, timeout=TIMEOUT) as r:
+            raw = r.read(PICTURE_MAX + 1)
+    except (urllib.error.URLError, OSError, ValueError):
+        return None
+    if len(raw) > PICTURE_MAX:
+        return None
+    kind = next((name for magic, name in COVER_KINDS if raw.startswith(magic)), None)
+    return (raw, kind) if kind else None
+
+
+def _sgdb_icon_file(rom_id, picture):
+    """The icon as a file of its own (Steam takes an entry's icon by path); its path, or None."""
+    path = os.path.join(SGDB_ICONS, "%d.%s" % (rom_id, picture[1]))
+    tmp = path + ".tmp"
+    try:
+        os.makedirs(SGDB_ICONS, exist_ok=True)
+        with open(tmp, "wb") as f:
+            f.write(picture[0])
+        os.replace(tmp, path)
+        return path
+    except OSError:
+        return None
+
+
+def _sgdb_pictures(key, rom_id, name, kinds):
+    """The pictures of `kinds` SteamGridDB has for the game named `name`: {kind: (bytes, kind)} with
+    "icon" as a path, or "refused" / "unreachable"."""
+    want = _sgdb_name(name)
+    if want not in _sgdb_ids:
+        status, found = _sgdb_get(key, "/search/autocomplete/" + urllib.parse.quote(name, safe=""))
+        if status in (401, 403):
+            return "refused"
+        if status != 200 or not isinstance(found, dict):
+            return "unreachable"
+        _sgdb_ids[want] = _sgdb_match(name, found.get("data") if isinstance(found.get("data"), list) else [])
+    game = _sgdb_ids[want]
+    out = {}
+    if not game:
+        return out
+    for kind in kinds:
+        endpoint, filters = SGDB_KINDS[kind]
+        status, found = _sgdb_get(key, "/%s/game/%d" % (endpoint, game), {**filters, **SGDB_PLAIN})
+        if status in (401, 403):
+            return "refused"
+        listed = found.get("data") if status == 200 and isinstance(found, dict) else None
+        for item in (listed if isinstance(listed, list) else [])[:3]:
+            got = _sgdb_image(item.get("url")) if isinstance(item, dict) else None
+            if got:
+                out[kind] = _sgdb_icon_file(rom_id, got) if kind == "icon" else got
+                break
+        if kind in out and out[kind] is None:
+            del out[kind]
+    return out
+
+
 def _rom_files(rom):
     """The names and sizes of a game's files, as RomM lists them."""
     files = rom.get("files") if isinstance(rom.get("files"), list) else []
@@ -2751,6 +2888,70 @@ class Plugin:
             got = await loop.run_in_executor(None, _picture, server, key, rom, kind)
             if got:
                 out[kind] = {"data": base64.b64encode(got[0]).decode("ascii"), "kind": got[1]}
+        return out
+
+    async def sgdb_status(self):
+        """Whether pictures may come from SteamGridDB (a key is kept), and "refused" when it
+        turned the key down. The key itself is never handed back."""
+        on = _sgdb_key() is not None
+        return {"on": True, "refused": True} if on and _sgdb_refused[0] else {"on": on}
+
+    async def sgdb_set_key(self, key):
+        """Keeps the player's own SteamGridDB key: {"result"}: "ok", "invalid" (not shaped like
+        one) or "error" (not saved)."""
+        key = key.strip() if isinstance(key, str) else ""
+        if not SGDB_KEY_SHAPE.fullmatch(key):
+            return {"result": "invalid"}
+        if not _write_private(SGDB_FILE, {"key": key}):
+            return {"result": "error"}
+        _sgdb_refused[0] = False
+        _sgdb_ids.clear()
+        decky.logger.info("SteamGridDB key kept")
+        return {"result": "ok"}
+
+    async def sgdb_forget(self):
+        """Forgets the SteamGridDB key: nothing more is asked of it."""
+        try:
+            os.remove(SGDB_FILE)
+        except OSError:
+            pass
+        _sgdb_refused[0] = False
+        _sgdb_ids.clear()
+        decky.logger.info("SteamGridDB key forgotten")
+        return {"ok": True}
+
+    async def sgdb_pictures(self, rom_id, kinds=("cover", "wide", "hero", "logo", "icon")):
+        """The pictures SteamGridDB has of `kinds` for a game, only those RomM does not keep:
+        {"ok": True, kind: {"data", "kind"}} and "icon": {"path"}. Without a key: {"ok": False,
+        "why": "off"}, and nothing is asked of anyone."""
+        key = _sgdb_key()
+        if not key:
+            return {"ok": False, "why": "off"}
+        rom_id = _number(rom_id)
+        server, romm_key = _games_key()
+        if not server or rom_id <= 0:
+            return {"ok": False, "why": romm_key if not server else "game"}
+        kinds = [k for k in (kinds if isinstance(kinds, (list, tuple)) else []) if k in SGDB_KINDS]
+        loop = asyncio.get_running_loop()
+        rom, why = await loop.run_in_executor(None, _rom, server, romm_key, rom_id)
+        if not rom:
+            return {"ok": False, "why": why}
+        kinds = [k for k in kinds if not _romm_has(rom, k)]
+        name = _text(rom.get("name")).strip()
+        if not kinds or not name:
+            return {"ok": True}
+        got = await loop.run_in_executor(None, _sgdb_pictures, key, rom_id, name, kinds)
+        if got == "refused":
+            if not _sgdb_refused[0]:
+                decky.logger.warning("SteamGridDB turned the key down")
+            _sgdb_refused[0] = True
+            return {"ok": False, "why": "refused"}
+        if got == "unreachable":
+            return {"ok": False, "why": "unreachable"}
+        _sgdb_refused[0] = False
+        out = {"ok": True}
+        for kind, picture in got.items():
+            out[kind] = {"path": picture} if kind == "icon" else {"data": base64.b64encode(picture[0]).decode("ascii"), "kind": picture[1]}
         return out
 
     async def game_tidy(self):

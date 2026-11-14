@@ -194,6 +194,8 @@ export const refreshArt = (appid: number) => {
   rommArt(appid, ownedRom(appid))
     .catch(() => undefined)
     .then(() => (from ? borrowArt(appid, from) : undefined))
+    .catch(() => undefined)
+    .then(() => sgdbArt(appid, ownedRom(appid)))
     .catch(() => undefined);
 };
 
@@ -206,6 +208,51 @@ async function dress(appid: number, romId: number, from: number) {
   }
   const c = await cover(romId).catch(() => null);
   if (c?.ok) safe(() => SteamClient.Apps.SetCustomArtworkForApp(appid, c.data, c.kind, COVER), undefined);
+  await sgdbArt(appid, romId, c?.ok ? [COVER] : [], true).catch(() => undefined);
+}
+
+// SteamGridDB, last and only with the player's own key: the pictures the entry still lacks after
+// RomM's and the other entry's, and its icon when the add-on has just made it (a new entry has
+// none). A picture already there, given by RomM, Tender or the player, is never replaced. Asked
+// at most once a day per game; the backend sends SteamGridDB only the game's name.
+const sgdbPictures = callable<
+  [romId: number, kinds: string[]],
+  Reply & { cover?: Picture; wide?: Picture; hero?: Picture; logo?: Picture; icon?: { path: string } }
+>("sgdb_pictures");
+const sgdbOn = callable<[], { on: boolean }>("sgdb_status");
+const FROM_SGDB: [number, "cover" | "wide" | "hero" | "logo", string][] = [
+  [COVER, "cover", "GetCustomVerticalCapsuleURLs"],
+  [3, "wide", "GetCustomLandcapeImageURLs"], // sic: Steam's own spelling
+  [1, "hero", "GetCustomHeroImageURLs"],
+  [2, "logo", "GetCustomLogoImageURLs"],
+];
+const SGDB_ASKED = "vistazo-romm:sgdb-asked";
+async function sgdbArt(appid: number, romId: number, given: number[] = [], icon = false) {
+  if (!romId || !(await sgdbOn().catch(() => null))?.on) return;
+  const asked: Record<string, number> = safe(() => JSON.parse(localStorage.getItem(SGDB_ASKED) ?? "{}") ?? {}, {});
+  if (!icon && Date.now() - (asked[romId] ?? 0) < DAY) return;
+  // A moment for Steam to show the pictures just given before telling what is still missing.
+  await wait(2000);
+  // When Steam cannot say whether the entry has one, it counts as there: never replaced.
+  const has = (method: string) =>
+    safe(() => {
+      const mine = appStore.GetAppOverviewByAppID(appid);
+      return mine && typeof appStore[method] === "function" ? (appStore[method](mine) as string[]).length > 0 : true;
+    }, true);
+  const lacking = FROM_SGDB.filter(([type, , method]) => !given.includes(type) && !has(method));
+  const kinds: string[] = lacking.map(([, kind]) => kind);
+  if (icon) kinds.push("icon");
+  if (!kinds.length) return;
+  const got = await sgdbPictures(romId, kinds).catch(() => null);
+  if (!got?.ok) return;
+  asked[romId] = Date.now();
+  safe(() => localStorage.setItem(SGDB_ASKED, JSON.stringify(asked)), undefined);
+  for (const [type, kind, method] of lacking) {
+    const p = got[kind];
+    // Looked at again: the player may have picked one meanwhile.
+    if (p && !has(method)) safe(() => SteamClient.Apps.SetCustomArtworkForApp(appid, p.data, p.kind, type), undefined);
+  }
+  if (icon && got.icon?.path) safe(() => SteamClient.Apps.SetShortcutIcon(appid, got.icon!.path), undefined);
 }
 
 // Makes the add-on's own entry for a RomM game and starts bringing its file. `from` is the Steam

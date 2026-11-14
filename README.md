@@ -49,6 +49,10 @@ It does nothing without Vistazo installed.
 - **Pictures.** Each entry gets its cover from RomM and, when RomM keeps them, ScreenScraper's wide picture and logo
   (in RomM's `config.yml`, add `fanart` and `logo` to `scan.media`, then rescan with "update").
   What RomM lacks is copied from Tender's entry of the same game while Tender is installed.
+  With your own [SteamGridDB](https://www.steamgriddb.com) key (off until you paste one in **Pictures from
+  SteamGridDB**; it is on steamgriddb.com under Preferences › API), what is still missing comes from there: cover, wide
+  picture, hero and logo, and the icon of a new entry. A picture RomM or you already gave is never replaced, and a game
+  whose name matches none or several games on SteamGridDB gets nothing rather than another game's pictures.
 - **BIOS files.** The game's page says whether the BIOS files RomM has for its console are on the Deck, and brings the
   missing ones, checked against RomM's sums.
 
@@ -70,6 +74,10 @@ The add-on talks only to your own RomM server, at the address in its settings, w
 your user only. It never follows a redirect, checks every download against RomM's own sum, and removes only files
 it brought itself. A game starts through a small launcher that Steam hands nothing but the game's number: no file
 name goes through Steam's launch options. No telemetry.
+
+Only when you give it a SteamGridDB key does the add-on talk to anyone else: it sends SteamGridDB the name of a game
+whose pictures are missing, over HTTPS, with that key. The key is kept on the Deck for your user only, is never logged
+and goes nowhere but SteamGridDB; the pictures themselves are fetched from SteamGridDB's image servers without it.
 
 ## Building
 
