@@ -29,6 +29,9 @@ It does nothing without Vistazo installed.
 - **Emulator of a game.** The panel, with the game's page open, picks which of RetroDECK's emulators for its console
   the entry starts (RetroDECK's own list and commands), or leaves it to RetroDECK. Save games are kept in step only
   with the usual one (melonDS DS for DS, Dolphin standalone for Wii); the panel says so when another is picked.
+- **Disc of a game.** For a game of several discs, the panel, with the game's page open, picks which disc the entry
+  starts, or all of them through a playlist so the emulator changes discs itself (RomM's playlist, or one the add-on
+  makes in the game's folder and removes with the game). Nothing chosen starts the game as before.
 - **RomM's collections in Steam.** The settings list RomM's collections: the ones people make, smart ones, and the
   ones RomM makes itself (series, franchises, genres, companies, game modes). Each one turned on shows in Steam as
   "RomM: [name]" and brings the entries of its games that are missing; turning it off removes only that collection.

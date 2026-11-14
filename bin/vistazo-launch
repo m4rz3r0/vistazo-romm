@@ -31,15 +31,24 @@ def game_path(table_file, rom_id):
         return None, "no game list"
     entry = table.get(rom_id) if isinstance(table, dict) else None
     emulator = None
+    folder = None
     if isinstance(entry, dict):
+        # The game's folder, when a disc of it was chosen: the disc must lie inside it.
+        folder = entry.get("folder", None)
         # RetroDECK's own command for the emulator chosen for this game.
         emulator = entry.get("emulator")
-        if not isinstance(emulator, str) or not emulator or "\0" in emulator or "\n" in emulator or len(emulator) > 1000:
+        if (emulator is not None or folder is None) and (
+                not isinstance(emulator, str) or not emulator or "\0" in emulator or "\n" in emulator or len(emulator) > 1000):
             return None, "the emulator chosen is not one RetroDECK has"
         entry = entry.get("path")
     path = entry
     if not isinstance(path, str) or not os.path.isabs(path) or "\0" in path:
         return None, "game not installed"
+    if folder is not None:
+        if not isinstance(folder, str) or not os.path.isabs(folder) or "\0" in folder:
+            return None, "the disc chosen is not in the game's folder"
+        if not os.path.realpath(path).startswith(os.path.realpath(folder) + os.sep):
+            return None, "the disc chosen is not in the game's folder"
     if not os.path.isfile(path):
         return None, "the game's file is gone"
     return (path, emulator), None

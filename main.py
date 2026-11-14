@@ -342,6 +342,9 @@ def _write_games(data):
         if isinstance(game, dict) and game.get("installed") and isinstance(game.get("path"), str):
             command = _emulators(_text(game.get("system"))).get(_text(game["emulator"])) if game.get("emulator") else None
             table[str(game.get("rom_id"))] = {"path": game["path"], "emulator": command} if command else game["path"]
+            disc = _disc_path(game)  # another disc chosen: the launcher also checks it is in the game's folder
+            if disc:
+                table[str(game.get("rom_id"))] = {"path": disc[0], "folder": disc[1], **({"emulator": command} if command else {})}
     return _write_private(LAUNCH_FILE, table)
 
 
@@ -940,6 +943,103 @@ def _download(server, token, rom, job, started=lambda part: None, resume=None):
     lists = [f for f in made if f.lower().endswith(".m3u")]
     start = lists[0] if len(lists) == 1 else max(made, key=os.path.getsize)
     return {"path": start, "files": made, "folders": [folder], "size": sum(os.path.getsize(f) for f in made)}
+
+
+# ── Discs ─────────────────────────────────────────────────────────────────────────────────────
+# A game of several discs comes as a folder, and one file of it starts. The player may choose
+# another disc, or every disc through a playlist (the emulator then changes discs itself). The
+# choice is the file's path, kept in the game's record as "disc"; it is believed only while it is
+# one of the files the add-on recorded for the game, inside the game's recorded folder.
+DISC_KINDS = (".cue", ".chd", ".iso", ".gdi", ".rvz", ".cso", ".zso", ".pbp", ".ccd", ".mds", ".cdi",
+              ".gcm", ".gcz", ".wbfs", ".wia", ".ciso", ".nrg", ".img")
+PLAYLIST = ".m3u"
+
+
+def _game_folder(game):
+    """The folder the add-on made for a game of several files (the one its file is in), or None."""
+    path, system = _text(game.get("path")), _text(game.get("system"))
+    if not path or not system or not game.get("installed"):
+        return None
+    system_dir = os.path.join(_roms_root(), system)
+    for folder in game.get("folders") or []:
+        if isinstance(folder, str) and _within(path, folder) and _within(folder, system_dir):
+            return folder
+    return None
+
+
+def _game_owned(game, folder):
+    """The add-on's own files of a game that are inside its folder and still plain files there."""
+    return [f for f in game.get("files") or [] if isinstance(f, str) and _within(f, folder)
+            and os.path.isfile(f) and not os.path.islink(f)]
+
+
+def _tracks(sheet):
+    """The files a .cue, .gdi or .ccd sheet stands for (its tracks), as full paths."""
+    here, low = os.path.dirname(sheet), sheet.lower()
+    if low.endswith(".ccd"):
+        return {os.path.splitext(sheet)[0] + ext for ext in (".img", ".IMG", ".sub", ".SUB")}
+    try:
+        with open(sheet, encoding="utf-8", errors="replace") as f:
+            text = f.read(64 * 1024)
+    except OSError:
+        return set()
+    if low.endswith(".cue"):
+        names = [m[0] or m[1] for m in re.findall(r'^\s*FILE\s+(?:"([^"]+)"|(\S+))', text, flags=re.M | re.I)]
+    else:  # .gdi: "track start type sector name offset", the name quoted when it has spaces
+        names = [m[0] or m[1] for m in re.findall(r'^\s*\d+\s+\d+\s+\d+\s+\d+\s+(?:"([^"]+)"|(\S+))', text, flags=re.M)]
+    return {os.path.normpath(os.path.join(here, n.replace("\\", "/"))) for n in names}
+
+
+def _discs(game):
+    """(the game's folder, its discs in name order, its playlist or None): the discs are the files
+    that start a game on their own, never the tracks a sheet stands for. None for a game without
+    a folder of the add-on's."""
+    folder = _game_folder(game)
+    if not folder:
+        return None
+    owned = _game_owned(game, folder)
+    tracks = set()
+    for f in owned:
+        if f.lower().endswith((".cue", ".gdi", ".ccd")):
+            tracks |= _tracks(f)
+    discs = sorted((f for f in owned if f.lower().endswith(DISC_KINDS) and f not in tracks),
+                   key=lambda f: [int(p) if p.isdigit() else p.lower() for p in re.split(r"(\d+)", os.path.basename(f))])
+    lists = sorted(f for f in owned if f.lower().endswith(PLAYLIST))
+    return folder, discs, lists[0] if lists else None
+
+
+def _disc_path(game):
+    """(the disc chosen for a game, its folder) while that choice is still good, else None."""
+    disc = game.get("disc") if isinstance(game, dict) else None
+    found = _discs(game) if isinstance(disc, str) else None
+    if not found or (disc not in found[1] and disc != found[2]):
+        return None
+    return disc, found[0]
+
+
+def _make_playlist(game, folder, discs):
+    """A playlist of the discs in the game's folder, recorded as the add-on's file (so removing
+    the game removes it). Returns its path, or raises _Stop("exists") when a file of that name is
+    already there and not the add-on's: nothing is ever written over."""
+    name = _one_name(os.path.basename(folder) + PLAYLIST)
+    if not name:
+        raise _Stop("disc")
+    path = os.path.join(folder, name)
+    if os.path.lexists(path) or not _within(folder, os.path.join(_roms_root(), _text(game.get("system")))):
+        raise _Stop("exists")
+    lines = "".join(os.path.relpath(d, folder) + "\n" for d in discs)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o644)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(lines)
+    except OSError as e:
+        decky.logger.error("Playlist not written: %s", e)
+        raise _Stop("disk")
+    game["files"] = [f for f in game.get("files") or [] if isinstance(f, str)] + [path]
+    marks = game.get("marks") if isinstance(game.get("marks"), dict) else {}
+    marks[path] = _mark(path)
+    game["marks"] = marks
+    return path
 
 
 def _library(server, key):
@@ -3039,6 +3139,62 @@ class Plugin:
             if not _write_games(data):
                 return {"ok": False, "why": "disk"}
         return {"ok": True, "chosen": name}
+
+    async def game_discs(self, appid):
+        """The discs of a game of several: {"ok": True, "discs": [{"file", "name"}], "chosen":
+        "" (nothing chosen), "playlist" or a disc's file, "starts": what starts now, the same way
+        ("" when it is none of them)}. A game of one disc is {"ok": False, "why": "discs"}."""
+        appid = _number(appid)
+        with _lock:
+            game = _read_games()["games"].get(str(appid))
+            if not isinstance(game, dict):
+                return {"ok": False, "why": "game"}
+            found = _discs(game)
+            if not found or len(found[1]) < 2:
+                return {"ok": False, "why": "discs"}
+            chosen = _disc_path(game)
+
+        def said(path):
+            return "playlist" if path and path == found[2] else os.path.basename(path) if path in found[1] else ""
+        return {"ok": True, "discs": [{"file": os.path.basename(d), "name": os.path.splitext(os.path.basename(d))[0]} for d in found[1]],
+                "chosen": said(chosen[0]) if chosen else "", "starts": said(chosen[0] if chosen else _text(game.get("path")))}
+
+    async def game_set_disc(self, appid, choice):
+        """Starts this game from that disc from now on: a disc's file, "playlist" for every disc
+        (RomM's playlist, or one made in the game's folder), or "" for the add-on's own choice."""
+        appid = _number(appid)
+        with _lock:
+            data = _read_games()
+            game = data["games"].get(str(appid))
+            if not isinstance(game, dict):
+                return {"ok": False, "why": "game"}
+            if _active(_jobs.get(appid)) or isinstance(game.get("switching"), dict):
+                return {"ok": False, "why": "busy"}
+            found = _discs(game)
+            if not found or len(found[1]) < 2:
+                return {"ok": False, "why": "discs"}
+            folder, discs, playlist = found
+            if not isinstance(choice, str):
+                return {"ok": False, "why": "disc"}
+            made = None
+            if choice == "playlist":
+                try:
+                    made = None if playlist else _make_playlist(game, folder, discs)
+                except _Stop as stop:
+                    return {"ok": False, "why": str(stop)}
+                game["disc"] = playlist or made
+            elif choice:
+                picked = [d for d in discs if os.path.basename(d) == choice]
+                if not picked:
+                    return {"ok": False, "why": "disc"}
+                game["disc"] = picked[0]
+            else:
+                game.pop("disc", None)
+            if not _write_games(data):
+                if made:  # not recorded, so not left behind either
+                    _discard([made], [], os.path.join(_roms_root(), _text(game.get("system"))))
+                return {"ok": False, "why": "disk"}
+        return {"ok": True, "chosen": choice}
 
     async def game_gone(self):
         """The add-on's entries whose game was deleted in RomM: {"ok": True, "apps": [appid]}."""
