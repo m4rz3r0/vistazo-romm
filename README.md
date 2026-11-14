@@ -19,6 +19,9 @@ It does nothing without Vistazo installed.
   write Roms user.
 - **Games deleted in RomM.** The settings list the entries whose game RomM no longer has, and remove them when you
   say so: only the files the add-on brought go, saves stay.
+- **RetroDECK's folders moved.** When RetroDECK's games or saves folder moves (to the SD card, say, with RetroDECK's
+  own tool), the entries follow the games and saves found at the same place in the new folder, with the same size
+  (saves: the same content). The add-on never moves files itself; a game not found there is left as it was.
 - **Versions of a game.** When RomM keeps a game in several versions (languages, regions), *Language of the games*
   picks which one new entries use, and the panel, with the game's page open, switches the one an entry starts. An
   installed game gets the other version brought first (the old one plays meanwhile); its save goes with it when the

@@ -2028,6 +2028,130 @@ b</command>
     os.remove(target)
 
 
+def test_moved_folders():
+    # RetroDECK's folders moved (to an SD card, say, with its own "move" tool): the records follow
+    # the files the add-on finds there, the same and in the same place inside; nothing is moved.
+    old = os.path.realpath(os.path.join(TMP, "moved-old", "roms"))
+    new = os.path.realpath(os.path.join(TMP, "moved-card", "retrodeck", "roms"))
+    outside = os.path.join(TMP, "moved-outside")
+    for d in (os.path.join(old, "nds", "Disc"), os.path.join(new, "nds", "Disc"), outside):
+        os.makedirs(d)
+    rd = os.path.join(HOME, ".var", "app", "net.retrodeck.retrodeck", "config", "retrodeck", "retrodeck.json")
+    os.makedirs(os.path.dirname(rd), exist_ok=True)
+    with open(rd, "w") as f:
+        json.dump({"paths": {"roms_path": new}}, f)
+    check("the new folder is RetroDECK's", main._roms_root(), new)
+
+    def put(path, data=DATA):
+        with open(path, "wb") as f:
+            f.write(data)
+        return path
+
+    def entry(rom_id, path, size=len(DATA), **more):
+        return {"rom_id": rom_id, "system": "nds", "platform": "nds", "size": size, "path": path,
+                "installed": True, "files": [path], "folders": [], "saves": {}, **more}
+
+    # Brought by the add-on under the old folder: its file, and the folder of an unpacked archive.
+    moved = put(os.path.join(old, "nds", "Moved.nds"))
+    disc_old = os.path.join(old, "nds", "Disc")
+    bin_old = put(os.path.join(disc_old, "a.bin"), b"disc")
+    games = main._read_games()
+    games["games"].update({
+        "8101": entry(81, moved, size=len(DATA) + 4, files=[moved, bin_old], folders=[disc_old],
+                      marks={moved: main._mark(moved), bin_old: main._mark(bin_old)}),
+        "8102": entry(82, os.path.join(old, "nds", "Nowhere.nds")),
+        "8103": entry(83, os.path.join(old, "nds", "Sized.nds")),
+        "8104": entry(84, put(os.path.join(outside, "Still.nds"))),
+        "8105": entry(85, os.path.join(old, "nds", "Link.nds")),
+        "8106": {"rom_id": 86, "system": "nds", "platform": "nds", "size": 9, "path": None, "installed": False,
+                 "files": [], "folders": [], "paused": True, "part": os.path.join(old, "nds", "Half.nds.part")},
+    })
+    main._write_games(games)
+    # The move: the files as they are now on the card (a copy does not keep their time), the old folder empty.
+    time.sleep(0.01)
+    shutil.copyfile(moved, os.path.join(new, "nds", "Moved.nds"))
+    shutil.copyfile(bin_old, os.path.join(new, "nds", "Disc", "a.bin"))
+    shutil.rmtree(os.path.join(old, "nds"))
+    os.makedirs(os.path.join(old, "nds"))
+    put(os.path.join(new, "nds", "Other.nds"), b"not the add-on's")
+    put(os.path.join(new, "nds", "Sized.nds"), DATA[:-1])
+    os.symlink(put(os.path.join(outside, "Link.nds")), os.path.join(new, "nds", "Link.nds"))
+    put(os.path.join(new, "nds", "Half.nds.part"), b"half")
+    before = main._read_games()["games"]
+
+    run(plugin._main())
+    after = main._read_games()["games"]
+    here = os.path.join(new, "nds", "Moved.nds")
+    bin_new = os.path.join(new, "nds", "Disc", "a.bin")
+    check("found in the new folder", after["8101"]["path"], here)
+    check("its files follow", after["8101"]["files"], [here, bin_new])
+    check("its folders follow", after["8101"]["folders"], [os.path.join(new, "nds", "Disc")])
+    check("its marks follow", list(after["8101"]["marks"]), [here, bin_new])
+    with open(main.LAUNCH_FILE) as f:
+        check("the launcher starts the moved file", json.load(f)["81"], here)
+    check("shown as there", run(plugin.game_state(8101))["installed"], True)
+    check("not in the new folder: unchanged", after["8102"], before["8102"])
+    check("another size: unchanged", after["8103"], before["8103"])
+    check("still where it was: untouched", after["8104"], before["8104"])
+    check("a link out of the folder: refused", after["8105"], before["8105"])
+    check("the paused download's half follows", after["8106"]["part"], os.path.join(new, "nds", "Half.nds.part"))
+    check("nothing moved or removed", sorted(os.listdir(os.path.join(new, "nds"))),
+          ["Disc", "Half.nds.part", "Link.nds", "Moved.nds", "Other.nds", "Sized.nds"])
+    check("the old folder is left as it was", os.listdir(os.path.join(old, "nds")), [])
+
+    # Found when the panel asks too, not only at start.
+    games = main._read_games()
+    later = put(os.path.join(new, "nds", "Later.nds"))
+    games["games"]["8107"] = entry(87, os.path.join(old, "nds", "Later.nds"))
+    main._write_games(games)
+    check("found when asked", run(plugin.game_state(8107))["installed"], True)
+    check("and kept", main._read_games()["games"]["8107"]["path"], later)
+
+    # The save's record follows RetroDECK's saves folder too, when the save there is the same one.
+    cfg = os.path.join(HOME, main.RETROARCH_CFG)
+    kept_cfg = None
+    if os.path.isfile(cfg):
+        with open(cfg) as f:
+            kept_cfg = f.read()
+    os.makedirs(os.path.dirname(cfg), exist_ok=True)
+    with open(cfg, "w") as f:
+        f.write('savefiles_in_content_dir = "false"\nsort_savefiles_by_content_enable = "true"\n'
+                'sort_savefiles_enable = "false"\n')
+    saves_new = os.path.realpath(os.path.join(TMP, "moved-card", "retrodeck", "saves"))
+    os.makedirs(os.path.join(saves_new, "nds"))
+    with open(rd, "w") as f:
+        json.dump({"paths": {"roms_path": new, "saves_path": saves_new}}, f)
+    srm = put(os.path.join(saves_new, "nds", "Later.srm"), b"save")
+    games = main._read_games()
+    games["games"]["8107"]["saves"] = {"main": {"path": os.path.join(TMP, "moved-old", "saves", "nds", "Later.srm"),
+                                                "hash": main._md5(srm), "mtime": 1}, "state": "in-step"}
+    main._write_games(games)
+    run(plugin._main())
+    check("the save's record follows", main._read_games()["games"]["8107"]["saves"]["main"]["path"], srm)
+    check("not taken for a change", run(plugin.save_state(8107))["changed"], False)
+    # Another save there is not taken for the one remembered.
+    games = main._read_games()
+    games["games"]["8107"]["saves"]["main"].update(path=os.path.join(TMP, "moved-old", "saves", "nds", "Later.srm"), hash="0" * 32)
+    main._write_games(games)
+    run(plugin._main())
+    check("another save: unchanged", main._read_games()["games"]["8107"]["saves"]["main"]["hash"], "0" * 32)
+    check("still its old place", main._read_games()["games"]["8107"]["saves"]["main"]["path"],
+          os.path.join(TMP, "moved-old", "saves", "nds", "Later.srm"))
+
+    # Removing a moved game takes away only what the add-on brought.
+    check("removed", run(plugin.game_remove(8101))["ok"], True)
+    check("only its files", sorted(os.listdir(os.path.join(new, "nds"))),
+          ["Half.nds.part", "Later.nds", "Link.nds", "Other.nds", "Sized.nds"])
+    for appid in (8101, 8102, 8103, 8104, 8105, 8106, 8107):
+        run(plugin.game_release(appid))
+    if kept_cfg is None:
+        os.remove(cfg)
+    else:
+        with open(cfg, "w") as f:
+            f.write(kept_cfg)
+    os.remove(rd)
+
+
 try:
     test_server()
     test_move_in()
@@ -2047,6 +2171,7 @@ try:
     test_play()
     test_gone()
     test_queue()
+    test_moved_folders()
     print("ok: %d checks" % checks)
 finally:
     server.shutdown()

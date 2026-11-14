@@ -1413,6 +1413,164 @@ def _save_mtime(path, kind):
     return max((os.stat(f).st_mtime_ns for f in _folder_files(path).values()), default=0)
 
 
+# ── RetroDECK's folders moved ─────────────────────────────────────────────────────────────────
+# RetroDECK can move its folders (to an SD card, say). The games file then still names the old
+# places: a game whose file is now in RetroDECK's current folder, at the same place inside it and
+# of the same size, has its records follow it. Nothing on the disk is moved, copied or removed.
+
+def _moved_from(game, path, system_dir):
+    """The game's system folders it may have been recorded under, other than today's: the
+    games folder it was installed under when recorded, then each `<system>` step of its path."""
+    system = os.path.basename(system_dir)
+    out = []
+    root = game.get("roms_root")
+    if isinstance(root, str) and os.path.isabs(root):
+        out.append(os.path.join(root, system))
+    parts = path.split(os.sep)
+    out += [os.sep.join(parts[:i + 1]) for i in range(len(parts) - 2, 0, -1) if parts[i] == system]
+    return [d for d in dict.fromkeys(out) if d and os.path.realpath(d) != os.path.realpath(system_dir)]
+
+
+def _moved_path(path, old_dir, system_dir):
+    """Where a path recorded under `old_dir` is under `system_dir`, as a real path inside it;
+    the path itself when it was not under `old_dir`; None when it would lead out of it."""
+    if not isinstance(path, str) or not path.startswith(old_dir + os.sep):
+        return path
+    rest = path[len(old_dir) + 1:].split(os.sep)
+    if not rest or any(p in ("", ".", "..") for p in rest):
+        return None
+    return _within(os.path.join(system_dir, *rest), system_dir)
+
+
+def _plain_file(path):
+    return isinstance(path, str) and os.path.isfile(path) and not os.path.islink(path)
+
+
+def _moved_record(rec, old_dir, system_dir):
+    """A copy of a record ({"path", "files", "folders", "marks", "part"}) with its paths under
+    `system_dir`, or None when one of them would lead out of it. A file found there with its
+    mark's size is marked anew (a move by copy does not keep its time); another keeps its old
+    mark, so it never counts as the add-on's."""
+    new = dict(rec)
+    for key in ("path", "part"):
+        if isinstance(rec.get(key), str):
+            new[key] = _moved_path(rec[key], old_dir, system_dir)
+            if new[key] is None:
+                return None
+    for key in ("files", "folders"):
+        if isinstance(rec.get(key), list):
+            new[key] = [_moved_path(p, old_dir, system_dir) for p in rec[key]]
+            if None in new[key]:
+                return None
+    if isinstance(rec.get("marks"), dict):
+        marks = {}
+        for path, mark in rec["marks"].items():
+            there = _moved_path(path, old_dir, system_dir)
+            if there is None:
+                return None
+            same = (there != path and isinstance(mark, list) and mark and _plain_file(there)
+                    and os.path.getsize(there) == mark[0])
+            marks[there] = _mark(there) if same else mark
+        new["marks"] = marks
+    return new
+
+
+def _moved_whole(rec, new):
+    """Whether the moved record's game is all there: its file, of the size it had."""
+    path = new.get("path")
+    if not _plain_file(path):
+        return False
+    mark = (rec.get("marks") or {}).get(rec.get("path")) if isinstance(rec.get("marks"), dict) else None
+    if isinstance(mark, list) and mark:
+        return os.path.getsize(path) == mark[0]
+    size = _number(rec.get("size"))
+    files = [f for f in new.get("files") or [] if isinstance(f, str)]
+    if not size:
+        return False
+    if len(files) > 1:
+        return all(_plain_file(f) for f in files) and sum(os.path.getsize(f) for f in files) == size
+    return os.path.getsize(path) == size
+
+
+def _relocate(game, roms=None):
+    """Has the game's records follow RetroDECK's moved games folder, when its file (or a paused
+    download's half) is no longer where recorded but is in the same place inside today's folder.
+    Changes `game` in place; True when it did."""
+    if not isinstance(game, dict):
+        return False
+    system = _one_name(_text(game.get("system")))
+    if not system:
+        return False
+    roms = roms or _roms_root()
+    system_dir = os.path.join(roms, system)
+    if not os.path.isdir(system_dir) or _within(system_dir, roms) != os.path.realpath(system_dir):
+        return False
+    system_dir = os.path.realpath(system_dir)
+    installed = bool(game.get("installed")) and isinstance(game.get("path"), str)
+    anchor = game.get("path") if installed else game.get("part") if game.get("paused") else None
+    if not isinstance(anchor, str) or not os.path.isabs(anchor) or os.path.lexists(anchor):
+        return False
+    for old_dir in _moved_from(game, anchor, system_dir):
+        new = _moved_record(game, old_dir, system_dir)
+        if new is None:
+            continue
+        if installed and not _moved_whole(game, new):
+            continue
+        if not installed and not (_plain_file(new.get("part")) and new["part"].endswith(".part")):
+            continue
+        sw = game.get("switching")
+        if isinstance(sw, dict):
+            new["switching"] = _moved_record(sw, old_dir, system_dir) or sw
+        game.clear()
+        game.update(new)
+        return True
+    return False
+
+
+def _relocate_save(game):
+    """Has the save's record follow RetroDECK's moved saves folder: when the save remembered is
+    gone from where it was, and the one where saves now go is the very same (its sum)."""
+    saves = game.get("saves") if isinstance(game, dict) else None
+    last = saves.get("main") if isinstance(saves, dict) else None
+    if not isinstance(last, dict) or not isinstance(last.get("path"), str) or not last.get("hash"):
+        return False
+    if os.path.lexists(last["path"]):
+        return False
+    try:
+        path, kind = _save_file(game)
+        if path is None or path == last["path"] or os.path.islink(path) or not _save_here(path, kind):
+            return False
+        if _save_hash(path, kind) != last["hash"]:
+            return False
+        last.update(path=path, mtime=_save_mtime(path, kind))
+    except (OSError, _Stop):
+        return False
+    return True
+
+
+def _relocate_all(data):
+    """Under the lock: every game's records follow RetroDECK's moved folders. How many moved."""
+    roms = _roms_root()
+    moved = 0
+    for game in data["games"].values():
+        if _relocate(game, roms):
+            moved += 1
+        _relocate_save(game)
+    return moved
+
+
+def _relocated(appid):
+    """Under the lock: the game's record, after following RetroDECK's moved folders when its
+    file is not where recorded (the games file and the launcher's list written then)."""
+    data = _read_games()
+    game = data["games"].get(str(appid))
+    if isinstance(game, dict) and ((game.get("installed") and not os.path.isfile(_text(game.get("path"))))
+                                   or (game.get("paused") and not os.path.isfile(_text(game.get("part"))))):
+        if _relocate(game):
+            _write_games(data)
+    return game
+
+
 def _zip_folder(path):
     """A save kept as a folder, as one zip to send or keep (the same files give the same sum)."""
     out = io.BytesIO()
@@ -2405,7 +2563,7 @@ class Plugin:
         """Whether Vistazo looks after this Steam game, has its file, and how a download goes."""
         appid = _number(appid)
         with _lock:
-            return _state(appid, _read_games()["games"].get(str(appid)))
+            return _state(appid, _relocated(appid))
 
     async def game_take(self, appid, rom_id, exe="", start_dir="", options=""):
         """Vistazo starts this game from now on. `exe`, `start_dir` and `options` are what its
@@ -2555,7 +2713,7 @@ class Plugin:
         if not server:
             return {"ok": False, "why": key}
         with _lock:
-            game = _read_games()["games"].get(str(appid))
+            game = _relocated(appid)
             if not game:
                 return {"ok": False, "why": "game"}
             job = _jobs.get(appid)
@@ -2933,6 +3091,9 @@ class Plugin:
             data = _read_games()
             if data["games"]:
                 _install_launcher()
+                moved = _relocate_all(data)
+                if moved:
+                    decky.logger.info("%d games found in RetroDECK's new folder", moved)
                 _write_games(data)
                 _sweep_parts()
 
