@@ -2,6 +2,7 @@ import { ButtonItem, ConfirmModal, DropdownItem, PanelSection, PanelSectionRow, 
 import { useCallback, useEffect, useState } from "react";
 import { t } from "./i18n";
 import { GameState, RommCollection, Version, busyJob, gameEmulators, setEmulator, cancelOwn, clearGone, goneOwn, pauseOwn, playState, gameVersions, running, switchVersion, TenderGame, addOwn, rommCollections, turnCollection, giveBackTender, takeOverTender, tenderGames, tenderOn, clearLostOwn, dropNotInstalled, gameState, loadOwned, lostOwn, onOwnChange, ownedApp, ownedRom, removeOwn, retryOwn, syncLibrary } from "./own";
+import { Disc, gameDiscs, setDisc } from "./own";
 import { openGame } from "./page";
 import { PairAnswer, RommHealth, ServerAnswer, checkRomm, pairRomm, rommServer, setRommServer, unlinkRomm, useRomm } from "./romm";
 import { LANGUAGES, setOwnGames, setPreferredLanguage, setSyncSaves, useOwnGames, usePreferredLanguage, useSyncSaves } from "./settings";
@@ -597,6 +598,49 @@ function EmulatorRow({ appid }: { appid: number }) {
   );
 }
 
+// The disc the open game starts from, for a game of several: one of them, or all of them through a
+// playlist so the emulator changes discs itself. Shown only once the game is on the Deck.
+function DiscRow({ appid, installed }: { appid: number; installed: boolean }) {
+  const [info, setInfo] = useState<{ discs: Disc[]; chosen: string; starts: string } | null>(null);
+  const [said, setSaid] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    if (!installed) setInfo(null);
+    else
+      gameDiscs(appid)
+        .then((d) => alive && setInfo(d?.ok ? d : null))
+        .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, [appid, installed]);
+  if (!info || info.discs.length < 2) return null;
+  const selected = info.chosen || info.starts;
+  return (
+    <PanelSectionRow>
+      <DropdownItem
+        label={t.discLabel}
+        description={said ?? t.discDesc}
+        rgOptions={[
+          ...(selected ? [] : [{ data: "", label: t.discDefault }]),
+          { data: "playlist", label: t.discAll },
+          ...info.discs.map((d) => ({ data: d.file, label: d.name })),
+        ]}
+        selectedOption={selected}
+        onChange={(o) => {
+          if (running(appid)) return setSaid(t.ownWhy("running"));
+          setDisc(appid, String(o.data))
+            .then((r) => {
+              setSaid(r?.ok ? null : t.ownWhy(r?.why ?? "error"));
+              if (r?.ok) setInfo({ ...info, chosen: String(o.data) });
+            })
+            .catch(() => setSaid(t.ownWhy("error")));
+        }}
+      />
+    </PanelSectionRow>
+  );
+}
+
 // Games of Vistazo's that were deleted in RomM: one row, only while there are any. RomM is asked
 // each time the settings open; removing the entries asks first, as it takes them out of Steam.
 function GoneRow() {
@@ -743,6 +787,7 @@ function OwnRow() {
       </PanelSectionRow>
       {!!appid && <VersionRow appid={appid} state={state} onDone={() => setTick((n) => n + 1)} />}
       {!!appid && <EmulatorRow appid={appid} />}
+      {!!appid && <DiscRow appid={appid} installed={!!state?.installed} />}
       {!!appid && busyJob(state) && !state?.switching && (
         <PanelSectionRow>
           <ButtonItem layout="below" disabled={busy} onClick={() => act(() => pauseOwn(appid).then(() => null))}>

@@ -2028,6 +2028,121 @@ b</command>
     os.remove(target)
 
 
+def test_discs():
+    os.makedirs(os.path.join(ROMS, "ps2"), exist_ok=True)
+    fake_bin = os.path.join(TMP, "bin-discs")
+    os.makedirs(fake_bin)
+    seen = os.path.join(TMP, "flatpak-discs.json")
+    with open(os.path.join(fake_bin, "flatpak"), "w") as f:
+        f.write("#!/usr/bin/python3\nimport json, sys\njson.dump(sys.argv[1:], open(%r, 'w'))\n" % seen)
+    os.chmod(os.path.join(fake_bin, "flatpak"), 0o755)
+    env = {"PATH": fake_bin + ":/usr/bin:/bin", "HOME": HOME}
+
+    def launch(rom_id):
+        if os.path.exists(seen):
+            os.remove(seen)
+        done = subprocess.run([main.LAUNCHER, str(rom_id)], env=env, capture_output=True, text=True)
+        if done.returncode:
+            return done.returncode
+        with open(seen) as f:
+            return json.load(f)
+
+    def table():
+        with open(main.LAUNCH_FILE) as f:
+            return json.load(f)
+
+    # Two discs as .cue with their .bin tracks, and no playlist from RomM.
+    members = [("Two Cues (Disc 1).cue", b'FILE "Two Cues (Disc 1).bin" BINARY\n  TRACK 01 MODE2/2352\n'),
+               ("Two Cues (Disc 1).bin", b"a" * 5000),
+               ("Two Cues (Disc 2).cue", b'FILE "Two Cues (Disc 2).bin" BINARY\n  TRACK 01 MODE2/2352\n'),
+               ("Two Cues (Disc 2).bin", b"b" * 6000)]
+    romm.roms[180] = rom(180, "Two Cues", files=[(n, len(d)) for n, d in members], slug="ps2")
+    romm.content[180] = archive(members)
+    run(plugin.game_take(18000, 180))
+    run(plugin.game_download(18000))
+    check("cues brought", wait(18000)["job"]["state"], "installed")
+    folder = os.path.join(ROMS, "ps2", "Two Cues")
+    plain = os.path.join(folder, "Two Cues (Disc 2).bin")  # today's choice: the largest file
+    check("nothing chosen: the plain entry as before", table()["180"], plain)
+    check("the discs offered, never their tracks", run(plugin.game_discs(18000)),
+          {"ok": True, "discs": [{"file": "Two Cues (Disc 1).cue", "name": "Two Cues (Disc 1)"},
+                                 {"file": "Two Cues (Disc 2).cue", "name": "Two Cues (Disc 2)"}],
+           "chosen": "", "starts": ""})
+    for bad in ("Two Cues (Disc 1).bin", "../Two Cues (Disc 1).cue", "/etc/passwd", "Nope.cue", 7):
+        check("not a disc: %r" % (bad,), run(plugin.game_set_disc(18000, bad))["why"], "disc")
+    check("still plain", table()["180"], plain)
+    disc2 = os.path.join(folder, "Two Cues (Disc 2).cue")
+    check("disc chosen", run(plugin.game_set_disc(18000, "Two Cues (Disc 2).cue")), {"ok": True, "chosen": "Two Cues (Disc 2).cue"})
+    check("kept", [run(plugin.game_discs(18000))[k] for k in ("chosen", "starts")], ["Two Cues (Disc 2).cue", "Two Cues (Disc 2).cue"])
+    check("the launcher is told the disc and its folder", table()["180"], {"path": disc2, "folder": folder})
+    check("the disc starts", launch(180), ["run", "net.retrodeck.retrodeck", disc2])
+    # A list pointing outside the game's folder is not believed.
+    wrong = table()
+    wrong["180"] = {"path": os.path.join(ROMS, "ps2", "elsewhere.iso"), "folder": folder}
+    with open(wrong["180"]["path"], "wb") as f:
+        f.write(b"x")
+    main._write_private(main.LAUNCH_FILE, wrong)
+    check("a file outside the folder refused", launch(180), 2)
+    os.remove(wrong["180"]["path"])
+    run(plugin.game_set_disc(18000, "Two Cues (Disc 2).cue"))
+    # A disc that went away (or a choice the record no longer holds) falls back to the plain entry.
+    data = main._read_games()
+    data["games"]["18000"]["disc"] = os.path.join(ROMS, "ps2", "Two Cues (Disc 3).cue")
+    main._write_games(data)
+    check("an unknown disc is never started", table()["180"], plain)
+    # A playlist of the player's own already there is never overwritten.
+    theirs = os.path.join(folder, "Two Cues.m3u")
+    with open(theirs, "wb") as f:
+        f.write(b"mine\n")
+    check("their playlist left alone", (run(plugin.game_set_disc(18000, "playlist"))["why"], open(theirs, "rb").read()), ("exists", b"mine\n"))
+    os.remove(theirs)
+    check("all discs", run(plugin.game_set_disc(18000, "playlist")), {"ok": True, "chosen": "playlist"})
+    with open(theirs, "rb") as f:
+        check("a playlist made of the discs", f.read(), b"Two Cues (Disc 1).cue\nTwo Cues (Disc 2).cue\n")
+    check("the playlist starts", launch(180), ["run", "net.retrodeck.retrodeck", theirs])
+    check("recorded as the add-on's", theirs in main._read_games()["games"]["18000"]["files"], True)
+    check("chosen again: the same playlist", run(plugin.game_set_disc(18000, "playlist"))["ok"], True)
+    check("back to nothing chosen", run(plugin.game_set_disc(18000, "")), {"ok": True, "chosen": ""})
+    check("plain again", table()["180"], plain)
+    check("started as before", launch(180), ["run", "net.retrodeck.retrodeck", plain])
+    run(plugin.game_set_disc(18000, "playlist"))
+    run(plugin.game_remove(18000))
+    check("the playlist goes with the game", os.path.exists(folder), False)
+    check("nothing to choose without the game", run(plugin.game_discs(18000))["ok"], False)
+    run(plugin.game_release(18000))
+
+    # RomM's own playlist is the one offered, and nothing new is made.
+    members = [("Disc A.chd", b"a" * 3000), ("Disc B.chd", b"b" * 4000), ("Pair.m3u", b"Disc A.chd\nDisc B.chd\n")]
+    romm.roms[181] = rom(181, "Pair", files=[(n, len(d)) for n, d in members], slug="ps2")
+    romm.content[181] = archive(members)
+    run(plugin.game_take(18100, 181))
+    run(plugin.game_download(18100))
+    wait(18100)
+    folder = os.path.join(ROMS, "ps2", "Pair")
+    check("RomM's playlist starts by default", [run(plugin.game_discs(18100))[k] for k in ("chosen", "starts")], ["", "playlist"])
+    check("one disc", run(plugin.game_set_disc(18100, "Disc A.chd"))["ok"], True)
+    check("that disc", table()["181"], {"path": os.path.join(folder, "Disc A.chd"), "folder": folder})
+    run(plugin.game_set_disc(18100, "playlist"))
+    check("RomM's playlist used", (table()["181"]["path"], sorted(os.listdir(folder))),
+          (os.path.join(folder, "Pair.m3u"), ["Disc A.chd", "Disc B.chd", "Pair.m3u"]))
+    run(plugin.game_remove(18100))
+    run(plugin.game_release(18100))
+
+    # A game of one file has nothing to choose, and its entry stays as it was.
+    romm.roms[182] = rom(182, "Single.iso", slug="ps2")
+    romm.content[182] = DATA
+    run(plugin.game_take(18200, 182))
+    run(plugin.game_download(18200))
+    wait(18200)
+    single = os.path.join(ROMS, "ps2", "Single.iso")
+    check("one file: no choice", run(plugin.game_discs(18200)), {"ok": False, "why": "discs"})
+    check("one file: none taken", run(plugin.game_set_disc(18200, "Single.iso"))["why"], "discs")
+    check("one file: plain entry", table()["182"], single)
+    run(plugin.game_remove(18200))
+    run(plugin.game_release(18200))
+    check("an unknown entry", run(plugin.game_discs(99999))["why"], "game")
+
+
 try:
     test_server()
     test_move_in()
@@ -2047,6 +2162,7 @@ try:
     test_play()
     test_gone()
     test_queue()
+    test_discs()
     print("ok: %d checks" % checks)
 finally:
     server.shutdown()
