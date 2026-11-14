@@ -2395,12 +2395,12 @@ def test_discs():
     run(plugin.game_download(18000))
     check("cues brought", wait(18000)["job"]["state"], "installed")
     folder = os.path.join(ROMS, "ps2", "Two Cues")
-    plain = os.path.join(folder, "Two Cues (Disc 2).bin")  # today's choice: the largest file
+    plain = os.path.join(folder, "Two Cues (Disc 1).cue")  # the first disc's sheet, never a track
     check("nothing chosen: the plain entry as before", table()["180"], plain)
     check("the discs offered, never their tracks", run(plugin.game_discs(18000)),
           {"ok": True, "discs": [{"file": "Two Cues (Disc 1).cue", "name": "Two Cues (Disc 1)"},
                                  {"file": "Two Cues (Disc 2).cue", "name": "Two Cues (Disc 2)"}],
-           "chosen": "", "starts": ""})
+           "chosen": "", "starts": "Two Cues (Disc 1).cue"})
     for bad in ("Two Cues (Disc 1).bin", "../Two Cues (Disc 1).cue", "/etc/passwd", "Nope.cue", 7):
         check("not a disc: %r" % (bad,), run(plugin.game_set_disc(18000, bad))["why"], "disc")
     check("still plain", table()["180"], plain)

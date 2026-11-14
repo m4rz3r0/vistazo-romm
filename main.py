@@ -1051,7 +1051,8 @@ def _download(server, token, rom, job, started=lambda part: None, resume=None):
                 os.remove(part)
         return {"path": target, "files": [target], "folders": [], "size": written}
     # Several files: RomM sends an archive, with a playlist when the game has discs. They go into
-    # a folder of the game's name; what starts is the playlist, or else the largest file.
+    # a folder of the game's name; what starts is the playlist, else the first disc's sheet (never
+    # one of the tracks it stands for), else the largest file.
     folder = os.path.join(system_dir, name)
     if os.path.lexists(folder):
         raise _Stop("exists")
@@ -1080,7 +1081,9 @@ def _download(server, token, rom, job, started=lambda part: None, resume=None):
         _discard([], [folder], system_dir)
         raise _Stop("archive")
     lists = [f for f in made if f.lower().endswith(".m3u")]
-    start = lists[0] if len(lists) == 1 else max(made, key=os.path.getsize)
+    sheets = sorted((f for f in made if f.lower().endswith((".cue", ".gdi", ".ccd"))),
+                    key=lambda f: [int(p) if p.isdigit() else p.lower() for p in re.split(r"(\d+)", os.path.basename(f))])
+    start = lists[0] if len(lists) == 1 else sheets[0] if sheets else max(made, key=os.path.getsize)
     return {"path": start, "files": made, "folders": [folder], "size": sum(os.path.getsize(f) for f in made)}
 
 
