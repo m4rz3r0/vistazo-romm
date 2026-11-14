@@ -516,6 +516,38 @@ def test_adopt():
     os.remove(one)
     os.remove(outside)
 
+    # Never another game's files: a folder holding other games, a file of another game, a file
+    # another of the add-on's games already holds.
+    shelf = os.path.join(nds, "Collection")
+    write(DATA, os.path.join(shelf, "Seventy.nds"))
+    write(DATA, os.path.join(shelf, "Other.nds"))
+    stranger = os.path.join(nds, "Stranger.nds")
+    write(DATA, stranger)
+    shared = os.path.join(nds, "Shared.nds")
+    write(DATA, shared)
+    for n, name in ((70, "Seventy.nds"), (71, "Seventy-one.nds"), (72, "Shared.nds"), (73, "Shared.nds")):
+        romm.roms[n] = rom(n, name)
+    tender_db([
+        (70, 7000, "Seventy", os.path.join(shelf, "Seventy.nds"), shelf),
+        (71, 7100, "Seventy-one", stranger, None),
+        (72, 7200, "Shared", shared, None),
+        (73, 7300, "Shared again", shared, None),
+    ])
+    got = run(plugin.game_adopt(7000, 70))
+    check("own file in a shared folder", (got["installed"], got["removable"]), (True, True))
+    run(plugin.game_remove(7000))
+    check("only its own file went", (os.path.exists(os.path.join(shelf, "Seventy.nds")), os.path.isfile(os.path.join(shelf, "Other.nds"))), (False, True))
+    got = run(plugin.game_adopt(7100, 71))
+    check("another game's file is not taken", (got["installed"], got["removable"]), (False, False))
+    check("first holder", run(plugin.game_adopt(7200, 72))["removable"], True)
+    check("second holder does not get it", run(plugin.game_adopt(7300, 73))["removable"], False)
+    run(plugin.game_remove(7300))
+    check("the first holder's file stays", os.path.isfile(shared), True)
+    for appid in (7000, 7100, 7200, 7300):
+        run(plugin.game_release(appid))
+    for f in (os.path.join(shelf, "Other.nds"), stranger, shared):
+        os.remove(f)
+
     # A database that cannot be read is no list, and no takeover.
     with open(tender_db([]), "wb") as f:
         f.write(b"not a database")

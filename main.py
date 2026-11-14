@@ -858,12 +858,19 @@ def _tender_games():
     return out
 
 
-def _tender_files(tender, system_dir):
+def _tender_files(tender, system_dir, rom, taken=()):
     """What Tender brought for a game, inside RetroDECK's folder for its console: (the file
-    that starts it or None, the files, the folders). Nothing outside that folder, no links."""
+    that starts it or None, the files, the folders). Only a file or folder carrying the game's
+    own name in RomM (a folder of other games is not this game's), nothing another of the
+    add-on's games already holds (`taken`), nothing outside that folder, no links."""
     path, files, folders = None, [], []
+    names = {n for n, _ in _rom_files(rom)} | {_text(rom.get("fs_name"))}
+    names.discard("")
+    taken = {os.path.realpath(t) for t in taken}
     folder = tender.get("dir")
-    if folder and os.path.isdir(folder) and not os.path.islink(folder) and _within(folder, system_dir):
+    if (folder and os.path.basename(os.path.normpath(folder)) in names and os.path.isdir(folder)
+            and not os.path.islink(folder) and _within(folder, system_dir)
+            and not any(t == os.path.realpath(folder) or t.startswith(os.path.realpath(folder) + os.sep) for t in taken)):
         for root, dirs, names in os.walk(folder):
             dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(root, d))]
             for name in names:
@@ -873,9 +880,12 @@ def _tender_files(tender, system_dir):
         folders = [os.path.realpath(folder)]
     file = tender.get("file")
     if file and os.path.isfile(file) and not os.path.islink(file) and _within(file, system_dir):
-        path = os.path.realpath(file)
-        if path not in files:
-            files.append(path)
+        real = os.path.realpath(file)
+        own_name = os.path.basename(real) in names or os.path.basename(os.path.dirname(real)) in names
+        if real in files or (own_name and real not in taken):
+            path = real
+            if real not in files:
+                files.append(real)
     return path, files, folders
 
 
@@ -1802,7 +1812,10 @@ class Plugin:
                     return {"ok": False, "why": "busy"}
             t_path, t_files, t_folders = None, [], []
             if detail["system"]:
-                t_path, t_files, t_folders = _tender_files(tender, os.path.join(_roms_root(), detail["system"]))
+                # What the add-on's other games hold stays theirs.
+                taken = [f for n, g in games.items() if n != str(own) and isinstance(g, dict)
+                         for f in (g.get("files") or []) + [g.get("path")] if isinstance(f, str) and f]
+                t_path, t_files, t_folders = _tender_files(tender, os.path.join(_roms_root(), detail["system"]), rom, taken)
             d = dup or {}
             d_path = _text(d.get("path")) if d.get("installed") and os.path.isfile(_text(d.get("path"))) else None
             path = d_path or t_path or _already_there(rom)

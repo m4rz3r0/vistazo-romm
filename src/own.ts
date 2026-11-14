@@ -428,6 +428,7 @@ export const tenderOn = () => !!safe(() => (DeckyPluginLoader?.plugins ?? []).so
 function details(appid: number): Promise<any> {
   return new Promise((done) => {
     let reg: any = null;
+    let got: any = undefined;
     const timer = setTimeout(() => {
       safe(() => reg?.unregister(), undefined);
       done(null);
@@ -435,12 +436,15 @@ function details(appid: number): Promise<any> {
     reg = safe(
       () =>
         SteamClient.Apps.RegisterForAppDetails(appid, (d: any) => {
+          got = d;
           clearTimeout(timer);
           safe(() => reg?.unregister(), undefined);
           done(d);
         }),
       null,
     );
+    // Steam may answer before the registration is returned: let go of it then.
+    if (got !== undefined) safe(() => reg?.unregister(), undefined);
   });
 }
 
@@ -464,7 +468,8 @@ export async function takeOverTender(step: (done: number, total: number) => void
       continue;
     }
     const d = await details(g.appid);
-    if (!d) {
+    // Without what the entry runs now, it could not be given back: left as it is.
+    if (!d?.strShortcutExe) {
       why = "steam";
       continue;
     }
