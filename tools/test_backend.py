@@ -2612,6 +2612,85 @@ def test_device():
     os.remove(rom_file)
 
 
+def test_input():
+    # The Steam Input layout per console: kept by the add-on, offered only when Steam has its template.
+    templates = os.path.join(HOME, ".steam", "steam", "controller_base", "templates")
+    os.makedirs(templates, exist_ok=True)
+    for name in ("controller_neptune_gamepad_joystick.vdf", "controller_neptune_gamepad+mouse.vdf"):
+        with open(os.path.join(templates, name), "w") as f:
+            f.write('"controller_mappings" {}')
+    with main._lock:
+        kept = main._read_games()
+        data = json.loads(json.dumps(kept))
+        data["games"].update({
+            "5101": {"rom_id": 51, "system": "nds", "installed": False, "files": [], "folders": []},
+            "5102": {"rom_id": 52, "system": "nds", "installed": False, "files": [], "folders": []},
+            "5201": {"rom_id": 53, "system": "wii", "installed": False, "files": [], "folders": []},
+        })
+        check("games written", main._write_games(data), True)
+    with open(main.GAMES_FILE, "rb") as f:
+        games_before = f.read()
+    try:
+        got = run(plugin.input_layouts())
+        check("layouts listed", got["ok"], True)
+        check("only templates Steam has", got["layouts"], ["gamepad", "mouse"])
+        consoles = {c["system"]: c for c in got["consoles"]}
+        check("nds with its two entries", (consoles["nds"]["count"], consoles["nds"]["layout"]), (2, ""))
+        check("wii unchanged at first", (consoles["wii"]["count"], consoles["wii"]["layout"]), (1, ""))
+        check("no console without entries", "ps2" in consoles, False)
+        with open(os.path.join(templates, "RetroDECK_controller_steamdeck_neptune_full.vdf"), "w") as f:
+            f.write('"controller_mappings" {}')
+        check("RetroDECK's once installed", run(plugin.input_layouts())["layouts"], ["retrodeck", "gamepad", "mouse"])
+
+        got = run(plugin.input_set_layout("nds", "mouse"))
+        check("layout set", got["ok"], True)
+        check("its template", got["url"], "template://controller_neptune_gamepad+mouse.vdf")
+        check("for every nds entry", sorted(got["apps"]), [5101, 5102])
+        check("remembered", {c["system"]: c["layout"] for c in run(plugin.input_layouts())["consoles"]}["nds"], "mouse")
+        check("kept on disk", mode(main.LAYOUTS_FILE), 0o600)
+        check("a new nds entry gets it", run(plugin.input_layout(5101)), {"ok": True, "url": "template://controller_neptune_gamepad+mouse.vdf"})
+        check("a wii entry keeps Steam's", run(plugin.input_layout(5201)), {"ok": True, "url": ""})
+        check("not one of the add-on's", run(plugin.input_layout(9999))["why"], "game")
+
+        check("unknown layout refused", run(plugin.input_set_layout("nds", "nope"))["why"], "layout")
+        check("console without entries refused", run(plugin.input_set_layout("ps2", "gamepad"))["why"], "system")
+        check("odd console refused", run(plugin.input_set_layout("../nds", "gamepad"))["why"], "system")
+        check("refusal leaves the choice", run(plugin.input_layout(5102))["url"], "template://controller_neptune_gamepad+mouse.vdf")
+
+        # A template Steam no longer has: nothing is applied, and the choice reads as unchanged.
+        os.remove(os.path.join(templates, "controller_neptune_gamepad+mouse.vdf"))
+        check("missing template not applied", run(plugin.input_layout(5101))["url"], "")
+        check("missing template not offered", {c["system"]: c["layout"] for c in run(plugin.input_layouts())["consoles"]}["nds"], "")
+        check("missing template refused", run(plugin.input_set_layout("wii", "mouse"))["why"], "layout")
+
+        got = run(plugin.input_set_layout("wii", "retrodeck"))
+        check("RetroDECK's for wii", (got["url"], got["apps"]), ("template://RetroDECK_controller_steamdeck_neptune_full.vdf", [5201]))
+        got = run(plugin.input_set_layout("wii", ""))
+        check("back to unchanged", (got["ok"], got["url"]), (True, ""))
+        check("unchanged applies nothing", run(plugin.input_layout(5201))["url"], "")
+
+        # A choice that cannot be kept on disk is said, and the one before stays.
+        real = main._write_private
+        main._write_private = lambda path, data: False
+        try:
+            check("disk refusal said", run(plugin.input_set_layout("wii", "gamepad"))["why"], "disk")
+        finally:
+            main._write_private = real
+        check("disk refusal keeps the old", run(plugin.input_layout(5201))["url"], "")
+
+        with open(main.LAYOUTS_FILE, "w") as f:
+            f.write("not json")
+        check("unreadable file reads as unchanged", run(plugin.input_layout(5102))["url"], "")
+        with open(main.GAMES_FILE, "rb") as f:
+            check("games file untouched", f.read(), games_before)
+    finally:
+        with main._lock:
+            main._write_games(kept)
+        shutil.rmtree(os.path.join(HOME, ".steam"), ignore_errors=True)
+        if os.path.exists(main.LAYOUTS_FILE):
+            os.remove(main.LAYOUTS_FILE)
+
+
 try:
     test_server()
     test_move_in()
@@ -2635,6 +2714,7 @@ try:
     test_moved_folders()
     test_discs()
     test_device()
+    test_input()
     print("ok: %d checks" % checks)
 finally:
     server.shutdown()

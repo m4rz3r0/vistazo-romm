@@ -35,6 +35,12 @@ It does nothing without Vistazo installed.
 - **Disc of a game.** For a game of several discs, the panel, with the game's page open, picks which disc the entry
   starts, or all of them through a playlist so the emulator changes discs itself (RomM's playlist, or one the add-on
   makes in the game's folder and removes with the game). Nothing chosen starts the game as before.
+- **Controls per console.** The settings pick, per console with entries, the Steam Input layout of the Deck's own
+  controls: *Leave as is* (the default, changes nothing), RetroDECK's layout with hotkeys (once RetroDECK installed its
+  templates), a plain gamepad, or a gamepad with the right trackpad as a mouse (handy for the DS screen or the Wii
+  pointer). It is put on all that console's entries and on the ones added later, through Steam's own layout picker; no
+  Steam file is written. Steam keeps a non-Steam entry's layout under its name, so another entry with the same name
+  shares it.
 - **RomM's collections in Steam.** The settings list RomM's collections: the ones people make, smart ones, and the
   ones RomM makes itself (series, franchises, genres, companies, game modes). Each one turned on shows in Steam as
   "RomM: [name]" and brings the entries of its games that are missing; turning it off removes only that collection.

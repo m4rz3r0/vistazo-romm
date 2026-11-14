@@ -6,6 +6,7 @@ import { Disc, gameDiscs, setDisc } from "./own";
 import { openGame } from "./page";
 import { deviceState } from "./own";
 import { SgdbRow } from "./Sgdb";
+import { InputRows } from "./InputRow";
 import { PairAnswer, RommHealth, ServerAnswer, checkRomm, pairRomm, rommServer, setRommServer, unlinkRomm, useRomm } from "./romm";
 import { LANGUAGES, setOwnGames, setPreferredLanguage, setSyncSaves, useOwnGames, usePreferredLanguage, useSyncSaves } from "./settings";
 
@@ -32,6 +33,7 @@ export function Settings() {
       {games && <TenderRow />}
       {games && <LanguageRow />}
       {games && <SgdbRow />}
+      {games && <InputRows />}
       {games && <LibraryRow />}
       {games && <CollectionsRow />}
       {games && <OwnRow />}

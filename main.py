@@ -2496,6 +2496,57 @@ def _device_brought(server, key, save):
     if device and _number(save.get("id")) > 0:
         _request(server, "POST", "/api/saves/%d/downloaded" % _number(save.get("id")), key["token"],
                  {"device_id": device, "content_hash": _text(save.get("content_hash")) or None})
+# ── Steam Input layout per console ────────────────────────────────────────────────────────────
+# The player may pick, per console, the Steam Input layout its entries use on the Deck's own
+# controls. Only the choice is kept here; Steam is asked to select it by the frontend (src/input.ts)
+# through SteamClient.Input, as Steam's own layout picker does. No Steam file is written.
+LAYOUTS_FILE = os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "layouts.json")
+# Each choice -> the Steam Deck template it selects, in the order offered. Valve's ship with
+# Steam; RetroDECK's is there once RetroDECK installed its templates (its own Steam entries use it).
+INPUT_LAYOUTS = (
+    ("retrodeck", "RetroDECK_controller_steamdeck_neptune_full.vdf"),
+    ("gamepad", "controller_neptune_gamepad_joystick.vdf"),
+    ("mouse", "controller_neptune_gamepad+mouse.vdf"),
+)
+STEAM_TEMPLATES = (
+    os.path.join(".steam", "steam", "controller_base", "templates"),
+    os.path.join(".local", "share", "Steam", "controller_base", "templates"),
+)
+
+
+def _input_layouts():
+    """The choices whose template Steam has: [(choice, template file)]."""
+    folders = [os.path.join(_home(), f) for f in STEAM_TEMPLATES]
+    return [(k, name) for k, name in INPUT_LAYOUTS if any(os.path.isfile(os.path.join(d, name)) for d in folders)]
+
+
+def _read_layouts():
+    """{console: choice} as the player left it; anything unreadable reads as no choice."""
+    try:
+        with open(LAYOUTS_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        chosen = data.get("systems") if isinstance(data, dict) else None
+        if isinstance(chosen, dict):
+            return {str(s): str(k) for s, k in chosen.items() if isinstance(k, str)}
+    except (OSError, ValueError):
+        pass
+    return {}
+
+
+def _layout_url(choice):
+    """The url Steam selects a template by, or "" when there is nothing to apply."""
+    name = dict(_input_layouts()).get(choice)
+    return "template://" + name if name else ""
+
+
+def _entries_by_system():
+    """{console: [appid]} of the add-on's entries."""
+    out = {}
+    for appid, game in _read_games()["games"].items():
+        system = _text(game.get("system")) if isinstance(game, dict) else ""
+        if system and _number(appid) > 0:
+            out.setdefault(system, []).append(_number(appid))
+    return out
 
 
 class Plugin:
@@ -3555,6 +3606,46 @@ class Plugin:
         key = _read_key()
         server = _server()
         return {"allowed": bool(key and server and key["url"] == server["url"] and _device_allowed(key))}
+    async def input_layouts(self):
+        """The consoles with entries and the Steam Input layout chosen for each: {"ok": True,
+        "layouts": [choice Steam has a template for], "consoles": [{"system", "count", "layout"}]}
+        ("layout" is "" when Steam's own is left as it is)."""
+        with _lock:
+            systems = _entries_by_system()
+            chosen = _read_layouts()
+        offered = [k for k, _ in _input_layouts()]
+        consoles = [{"system": s, "count": len(apps), "layout": chosen.get(s) if chosen.get(s) in offered else ""}
+                    for s, apps in sorted(systems.items())]
+        return {"ok": True, "layouts": offered, "consoles": consoles}
+
+    async def input_set_layout(self, system, layout):
+        """Keeps the layout for this console's entries ("": leave Steam's as it is). Answers with
+        what the frontend selects in Steam: {"ok": True, "url" ("" for nothing), "apps": [appid]}."""
+        system, layout = _text(system), _text(layout)
+        with _lock:
+            apps = _entries_by_system().get(system)
+            if not apps:
+                return {"ok": False, "why": "system"}
+            url = _layout_url(layout) if layout else ""
+            if layout and not url:
+                return {"ok": False, "why": "layout"}
+            chosen = _read_layouts()
+            if layout:
+                chosen[system] = layout
+            else:
+                chosen.pop(system, None)
+            if not _write_private(LAYOUTS_FILE, {"version": 1, "systems": chosen}):
+                return {"ok": False, "why": "disk"}
+        return {"ok": True, "url": url, "apps": sorted(apps)}
+
+    async def input_layout(self, appid):
+        """The layout a new entry of the add-on's gets: {"ok": True, "url" ("" for nothing)}."""
+        with _lock:
+            game = _read_games()["games"].get(str(_number(appid)))
+            if not isinstance(game, dict):
+                return {"ok": False, "why": "game"}
+            choice = _read_layouts().get(_text(game.get("system")), "")
+        return {"ok": True, "url": _layout_url(choice) if choice else ""}
 
     async def _main(self):
         _move_in()
