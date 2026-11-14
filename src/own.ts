@@ -2,6 +2,7 @@ import { callable } from "@decky/api";
 import { safe } from "./safe";
 import { rommGame } from "./romm";
 import { preferredLanguage } from "./settings";
+import { layoutNew } from "./input";
 
 // RomM games this add-on looks after itself (for those who turn it on). While Tender is installed
 // it keeps every game it has added to Steam for itself: it stops their launch to run its own
@@ -233,6 +234,7 @@ export async function addOwn(romId: number, name: string, from = 0, fetchFile = 
   owned.set(appid, romId);
   changed();
   dress(appid, romId, from).catch((e) => console.warn("[Vistazo RomM] pictures", e));
+  layoutNew(appid).catch((e) => console.warn("[Vistazo RomM] layout", e));
   if (fetchFile && !taken.installed) await download(appid).catch(() => null);
   return null;
 }
