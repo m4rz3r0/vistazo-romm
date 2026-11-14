@@ -40,6 +40,8 @@ SCOPES = {"me.read", "me.write"}
 SCOPES_GAMES = SCOPES | {"roms.read", "platforms.read", "collections.read", "firmware.read", "assets.read", "assets.write"}
 # Optional on top of either set: the player's own data of each game, where RomM keeps play time.
 SCOPES_PLAY = {"roms.user.read", "roms.user.write"}
+# Optional too: "modify devices", to register this Deck once and name it on each save and play session.
+SCOPES_DEVICE = {"devices.write"}
 CODE_CHARS = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"  # RomM's pairing alphabet
 TIMEOUT = 10
 # Decky's Python brings no certificates of its own: the system's are used to check RomM's.
@@ -1887,7 +1889,7 @@ def _send_save(server, key, rom_id, kind, path, name=""):
     )
     query = "/api/saves?rom_id=%d&emulator=%s&slot=%s&autocleanup=true&autocleanup_limit=%d" % (
         rom_id, urllib.parse.quote(kind[0], safe=""), SAVE_SLOT, SAVE_VERSIONS)
-    status, reply = _request(server, "POST", query, key["token"], raw=(body, "multipart/form-data; boundary=" + edge))
+    status, reply = _device_save_post(server, key, query, (body, "multipart/form-data; boundary=" + edge))
     if status == 401:
         _forget_key()
     if status in (401, 403):
@@ -1945,6 +1947,7 @@ def _sync_save(server, key, game, choice=""):
                 _put_folder(path, raw)
             else:
                 _put_save(path, raw)
+            _device_brought(server, key, theirs)
             return remember(theirs, state)
 
         def send(state="sent"):
@@ -2239,9 +2242,11 @@ def _play_send():
         waiting = _read_play()
         if not server:
             return len(waiting)
+        device = _device(server, key) if waiting else None
         while waiting:
             batch = waiting[:PLAY_BATCH]
-            status, reply = _request(server, "POST", "/api/play-sessions", key["token"], {"sessions": batch})
+            body = {"sessions": batch, "device_id": device} if device else {"sessions": batch}
+            status, reply = _request(server, "POST", "/api/play-sessions", key["token"], body)
             if status in (400, 422):
                 # Never going to be taken: not kept waiting for ever.
                 decky.logger.warning("RomM refused %d play sessions", len(batch))
@@ -2251,6 +2256,109 @@ def _play_send():
             if not _write_private(PLAY_FILE, {"sessions": waiting}):
                 break
         return len(waiting)
+
+
+# ── This Deck as one of the player's devices in RomM ────────────────────────────────────────────
+# RomM keeps a list of each player's devices and marks the saves and play sessions with the one
+# they came from. With a key that may modify devices, the add-on registers this Deck once, as a
+# Steam Deck, and keeps the id RomM gives it beside the address it is for. Nothing that tells who
+# or where goes with it: no host name, user name or network address (RomM matches devices by
+# those, so without them it always makes a new one: the id kept is what stops a second). The id is
+# checked once a run, and when RomM no longer knows it (deleted there) the Deck is registered
+# again. Without the scope, or with RomM not answering, saves and play time go as before.
+DEVICE_FILE = os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "device.json")
+DEVICE_ABOUT = {"name": "Steam Deck", "platform": "SteamOS", "client": "Vistazo RomM"}
+_device_lock = threading.Lock()
+_device_seen = set()  # (address, key id, device id) RomM confirmed during this run
+
+
+def _device_id_ok(v):
+    return isinstance(v, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,255}", v) is not None
+
+
+def _read_device():
+    try:
+        with open(DEVICE_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if isinstance(data, dict) and isinstance(data.get("url"), str) and _device_id_ok(data.get("id")):
+        return data
+    return None
+
+
+def _device_allowed(key):
+    return isinstance(key, dict) and _key_scopes(key) >= SCOPES_DEVICE
+
+
+def _device(server, key, gone=None):
+    """This Deck's id in RomM, registering it when there is none for this address; None when the
+    key may not, or RomM did not register it. `gone`: an id RomM just refused, checked again now."""
+    if not server or not _device_allowed(key):
+        return None
+    with _device_lock:
+        kept = _read_device()
+        known = kept["id"] if kept and kept["url"] == server["url"] else None
+        seen = (server["url"], key.get("id"), known)
+        if known and gone == known:
+            _device_seen.discard(seen)
+        if known and seen in _device_seen:
+            return known
+        if known:
+            # RomM has no way to only look a device up with this scope: an update that changes
+            # nothing answers whether it is still there.
+            status, _ = _request(server, "PUT", "/api/devices/" + urllib.parse.quote(known, safe=""), key["token"], {})
+            if status == 200:
+                _device_seen.add(seen)
+                return known
+            if status in (401, 403):
+                return None
+            if status != 404:
+                return known  # not answering now: still the one to name
+        status, reply = _request(server, "POST", "/api/devices", key["token"], dict(DEVICE_ABOUT))
+        new = reply.get("device_id") if status in (200, 201) and isinstance(reply, dict) else None
+        if not _device_id_ok(new):
+            return None
+        if not _write_private(DEVICE_FILE, {"url": server["url"], "id": new}):
+            return None
+        decky.logger.info("Registered in RomM as a device")
+        _device_seen.add((server["url"], key.get("id"), new))
+        return new
+
+
+def _device_save_post(server, key, query, raw):
+    """Posts a save to RomM, as this Deck when it may. Returns _request's (status, reply)."""
+    def post(device):
+        if not device:
+            return _request(server, "POST", query, key["token"], raw=raw)
+        mine = query + "&device_id=" + urllib.parse.quote(device, safe="")
+        status, reply = _request(server, "POST", mine, key["token"], raw=raw)
+        if status == 409:
+            # RomM refuses a device's save when it has not seen the slot's newest from that device
+            # (saves sent before it was one, or brought without telling). The add-on compared
+            # before sending: the save goes as a new version, as it does from no device.
+            status, reply = _request(server, "POST", mine + "&overwrite=true", key["token"], raw=raw)
+        return status, reply
+
+    device = _device(server, key)
+    status, reply = post(device)
+    if device and status == 404:
+        # The device, or the game: the device is checked, and registered again when it is gone.
+        again = _device(server, key, gone=device)
+        if again != device:
+            status, reply = post(again)
+    elif device and status == 403:
+        status, reply = post(None)  # RomM no longer lets the key name devices: as before
+    return status, reply
+
+
+def _device_brought(server, key, save):
+    """Tells RomM this Deck now has `save` (just brought, and checked), so RomM shows it and
+    takes the next save from here as following it. Best effort: nothing depends on it."""
+    device = _device(server, key)
+    if device and _number(save.get("id")) > 0:
+        _request(server, "POST", "/api/saves/%d/downloaded" % _number(save.get("id")), key["token"],
+                 {"device_id": device, "content_hash": _text(save.get("content_hash")) or None})
 
 
 class Plugin:
@@ -2342,7 +2450,7 @@ class Plugin:
                 await loop.run_in_executor(None, _request, server, "DELETE", "/api/client-tokens/%d" % token_id, token)
 
         # Less than the pair it always needs, or more than Vistazo should ever hold: not kept.
-        extra = scopes - SCOPES_GAMES - SCOPES_PLAY
+        extra = scopes - SCOPES_GAMES - SCOPES_PLAY - SCOPES_DEVICE
         if extra or not scopes >= SCOPES:
             await revoke()
             return "scopes", SCOPES - scopes, extra
@@ -3240,6 +3348,12 @@ class Plugin:
         server, _ = _play_key()
         waiting = await asyncio.get_running_loop().run_in_executor(None, _play_send)
         return {"allowed": bool(server), "waiting": waiting}
+
+    async def device_state(self):
+        """Whether RomM is told which saves and play time come from this Deck: {"allowed"}."""
+        key = _read_key()
+        server = _server()
+        return {"allowed": bool(key and server and key["url"] == server["url"] and _device_allowed(key))}
 
     async def _main(self):
         _move_in()
