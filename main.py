@@ -2894,7 +2894,11 @@ class Plugin:
                 changed = True
         except (OSError, _Stop):
             pass
-        return {"state": _text(saves.get("state")) or "unknown", "changed": changed}
+        state = _text(saves.get("state"))
+        # A state that said why the save was left alone (another emulator then, say) no longer holds.
+        if state in ("unsupported", "not-installed", "emulator", "layout", "game"):
+            state = ""
+        return {"state": state or "unknown", "changed": changed}
 
     async def game_list(self):
         """The Steam games Vistazo looks after: {Steam number: RomM number}."""

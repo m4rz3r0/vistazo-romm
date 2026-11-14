@@ -51,9 +51,32 @@ async function save(appid: number, anew: boolean): Promise<AddonGame["save"]> {
     return saveWord(known.state);
   const now = await saveSync(appid, "").catch(() => null);
   if (now && !["unreachable", "refused", "busy"].includes(now.state)) saveAsked.set(appid, Date.now());
+  else retrySave(appid);
   // Opening a page says only what moved; failures there show on the page itself.
   if (now && ["sent", "brought"].includes(now.state)) tellSave(appid, now.state);
   return saveWord(now?.state ?? "unreachable");
+}
+// RomM asleep or still waking when the page opened: asked again a little later, and the page
+// told once the answer is in, so it does not stay on "pending" until it is opened again.
+const SAVE_RETRIES = [15_000, 45_000, 120_000];
+const saveRetrying = new Set<number>();
+function retrySave(appid: number, attempt = 0) {
+  if (attempt === 0 && saveRetrying.has(appid)) return;
+  if (attempt >= SAVE_RETRIES.length) return void saveRetrying.delete(appid);
+  saveRetrying.add(appid);
+  setTimeout(() => {
+    if (!syncSaves() || running(appid)) return void saveRetrying.delete(appid);
+    saveSync(appid, "")
+      .then((now) => {
+        if (now && !["unreachable", "refused", "busy"].includes(now.state)) {
+          saveRetrying.delete(appid);
+          saveAsked.set(appid, Date.now());
+          if (["sent", "brought"].includes(now.state)) tellSave(appid, now.state);
+          tellChanged();
+        } else retrySave(appid, attempt + 1);
+      })
+      .catch(() => retrySave(appid, attempt + 1));
+  }, SAVE_RETRIES[attempt]);
 }
 // The files the console needs: asked once per game while Steam runs, and again after bringing them.
 const biosKnown = new Map<number, AddonGame["bios"]>();

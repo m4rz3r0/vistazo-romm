@@ -2215,6 +2215,7 @@ b</command>
     subprocess.run([main.LAUNCHER, "43"], env=env, capture_output=True, text=True)
     with open(seen) as f:
         check("started as before", json.load(f), ["run", "net.retrodeck.retrodeck", target])
+    check("the old 'another emulator' state is not kept", run(plugin.save_state(4300))["state"], "unknown")
     check("saves again", run(plugin.save_sync(4300))["state"] != "emulator", True)
     # A list where the emulator is not a plain line is not believed.
     with open(main.LAUNCH_FILE) as f:
