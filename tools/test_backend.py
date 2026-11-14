@@ -95,15 +95,26 @@ def rom(rom_id, name, files=None, slug="nds", **more):
 SAVE_CLOCK = [0]
 
 
+def romm_hash(data):
+    """RomM's content hash of a save: a zip by what is inside it, anything else by its bytes."""
+    import hashlib
+    import io
+    import zipfile
+    if zipfile.is_zipfile(io.BytesIO(data)):
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            lines = ["%s:%s" % (n, hashlib.md5(z.read(n)).hexdigest()) for n in sorted(z.namelist()) if not n.endswith("/")]
+        return hashlib.md5("\n".join(lines).encode()).hexdigest()
+    return hashlib.md5(data).hexdigest()
+
+
 def add_save(rom_id, data, name, emulator="retroarch-melondsds", slot="autosave", **more):
     """A save as RomM keeps it; each one a little newer than the last."""
-    import hashlib
     SAVE_CLOCK[0] += 1
     stem, ext = os.path.splitext(name)
     save = {
         "id": 100 + SAVE_CLOCK[0], "rom_id": rom_id, "file_name": "%s [2026-11-13 %02d]%s" % (stem, SAVE_CLOCK[0], ext),
         "file_name_no_tags": name, "file_extension": ext.lstrip("."), "file_size_bytes": len(data),
-        "emulator": emulator, "slot": slot, "content_hash": hashlib.md5(data).hexdigest(),
+        "emulator": emulator, "slot": slot, "content_hash": romm_hash(data),
         "updated_at": "2026-11-13T10:%02d:00Z" % SAVE_CLOCK[0], "missing_from_fs": False, "data": data, **more,
     }
     romm.saves.append(save)
@@ -1547,9 +1558,9 @@ def test_saves():
     flags()
 
     # A console whose saves are not known yet, and a game not on the Deck.
-    os.makedirs(os.path.join(ROMS, "wii"), exist_ok=True)
-    romm.roms[40] = rom(40, "Wii.rvz", slug="wii")
-    write(DATA, os.path.join(ROMS, "wii", "Wii.rvz"))
+    os.makedirs(os.path.join(ROMS, "psp"), exist_ok=True)
+    romm.roms[40] = rom(40, "Psp.iso", slug="psp")
+    write(DATA, os.path.join(ROMS, "psp", "Psp.iso"))
     run(plugin.game_take(4000, 40))
     check("console not handled yet", run(plugin.save_sync(4000))["state"], "unsupported")
     romm.roms[41] = rom(41, "Away.nds")
@@ -1558,7 +1569,7 @@ def test_saves():
     for appid in (500, 4000, 4100):
         run(plugin.game_release(appid))
     os.remove(rom_file)
-    os.remove(os.path.join(ROMS, "wii", "Wii.rvz"))
+    os.remove(os.path.join(ROMS, "psp", "Psp.iso"))
     check("the game's own files were never touched by all this", os.path.isfile(save), True)
 
 
@@ -1783,6 +1794,152 @@ def test_queue():
     check("nothing left", (os.path.exists(target), leftovers()), (False, []))
 
 
+def wii_zip(files):
+    import io
+    import zipfile
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as z:
+        for name, data in files.items():
+            z.writestr(name, data)
+    return out.getvalue()
+
+
+def test_wii_saves():
+    # As RetroDECK sets it: Dolphin's memory where its sandbox sees /var/data, a link to the saves.
+    home_app = os.path.join(HOME, main.RETRODECK_HOME)
+    ini = os.path.join(HOME, main.DOLPHIN_INI)
+    os.makedirs(os.path.dirname(ini), exist_ok=True)
+    with open(ini, "w") as f:
+        f.write("[Core]\nNANDRootPath = /nope/\n[General]\nWiiSDCardPath = /x\nNANDRootPath = /var/data/dolphin-emu/Wii/\n")
+    nand = os.path.join(HOME, "retrodeck", "saves", "wii", "dolphin")
+    os.makedirs(nand)
+    os.makedirs(os.path.join(home_app, "data", "dolphin-emu"))
+    os.symlink(nand, os.path.join(home_app, "data", "dolphin-emu", "Wii"))
+    check("Dolphin's memory found", main._wii_nand(), os.path.realpath(nand))
+
+    # The disc's letters, from each kind of file.
+    rvz = (b"RVZ\x01" + bytes(0x44) + b"\x00\x00\x00\x02" + bytes(0x0C) + b"RMGP01" + DATA)[:len(DATA)]
+    os.makedirs(os.path.join(ROMS, "wii"), exist_ok=True)
+    rom_file = os.path.join(ROMS, "wii", "Galaxy.rvz")
+    with open(rom_file, "wb") as f:
+        f.write(rvz)
+    check("disc letters, rvz", main._disc_id(rom_file), "RMGP01")
+    probe = os.path.join(TMP, "disc")
+    for kind, raw in (("wbfs", b"WBFS" + bytes(4) + b"\x09" + bytes(0x200 - 9) + b"SOUP01"),
+                      ("image", b"RZDP01" + bytes(0x12) + b"\x5d\x1c\x9e\xa3"),
+                      ("unknown", b"hello"), ("not letters", b"RVZ\x01" + bytes(0x44) + b"\x00\x00\x00\x02" + bytes(0x0C) + b"rm/p.."),
+                      ("GameCube", b"RVZ\x01" + bytes(0x44) + b"\x00\x00\x00\x01" + bytes(0x0C) + b"GALE01")):
+        with open(probe, "wb") as f:
+            f.write(raw)
+        check("disc letters, " + kind, main._disc_id(probe), {"wbfs": "SOUP01", "image": "RZDP01"}.get(kind))
+
+    romm.roms[42] = rom(42, "Galaxy.rvz", slug="wii")
+    check("taken, installed", run(plugin.game_take(4200, 42))["installed"], True)
+    folder = os.path.join(nand, "title", "00010000", "524d4750")
+    copies = os.path.join(HOME, "retrodeck", "saves", "wii", main.SAVE_COPIES_DIR)
+
+    def sync(choice=""):
+        return run(plugin.save_sync(4200, choice))
+
+    def put(files):
+        shutil.rmtree(folder, ignore_errors=True)
+        for name, data in files.items():
+            os.makedirs(os.path.dirname(os.path.join(folder, name)), exist_ok=True)
+            with open(os.path.join(folder, name), "wb") as f:
+                f.write(data)
+
+    def here():
+        return {os.path.relpath(os.path.join(r, n), folder): open(os.path.join(r, n), "rb").read()
+                for r, _, names in os.walk(folder) for n in names}
+
+    check("nothing anywhere yet", sync()["state"], "none")
+    first = {"data/GameData.bin": b"stars: 3", "data/banner.bin": b"banner", "content/title.tmd": b"tmd"}
+    put(first)
+    uploads = len(romm.uploads)
+    check("sent", sync()["state"], "sent")
+    q, name = romm.uploads[-1]
+    check("sent as a zip named after the game", (q["emulator"], q["slot"], name, len(romm.uploads) - uploads),
+          (["dolphin"], ["autosave"], "Galaxy.zip", 1))
+    sent = romm.saves[-1]
+    import io
+    import zipfile
+    with zipfile.ZipFile(io.BytesIO(sent["data"])) as z:
+        check("the folder inside", {n: z.read(n) for n in z.namelist()}, first)
+    check("same sum as RomM makes", main._save_hash(folder, main.SAVE_KINDS["wii"]), sent["content_hash"])
+    check("in step", sync()["state"], "synced")
+    check("no change seen", run(plugin.save_state(4200))["changed"], False)
+
+    # A newer one in RomM, nothing changed here: brought, after a copy of this one.
+    newer = {"data/GameData.bin": b"stars: 7", "data/banner.bin": b"banner", "content/title.tmd": b"tmd"}
+    add_save(42, wii_zip(newer), "Galaxy.zip", emulator="dolphin")
+    check("brought", sync()["state"], "brought")
+    check("folder replaced", here(), newer)
+    kept = os.listdir(copies)
+    check("one copy, beside the memory", (len(kept), kept[0].startswith("524d4750_"), kept[0].endswith(".zip")), (1, True, True))
+    with zipfile.ZipFile(os.path.join(copies, kept[0])) as z:
+        check("the copy is the old save", {n: z.read(n) for n in z.namelist()}, first)
+    check("nothing half-done beside it", sorted(os.listdir(os.path.dirname(folder))), ["524d4750"])
+
+    # Changed here: seen, and sent.
+    with open(os.path.join(folder, "data", "GameData.bin"), "wb") as f:
+        f.write(b"stars: 9")
+    os.utime(os.path.join(folder, "data", "GameData.bin"), ns=(1, 2_000_000_000_000_000_000))
+    check("change seen", run(plugin.save_state(4200))["changed"], True)
+    check("sent again", sync()["state"], "sent")
+
+    # Both changed: nothing touched until chosen.
+    with open(os.path.join(folder, "data", "GameData.bin"), "wb") as f:
+        f.write(b"stars: 10")
+    add_save(42, wii_zip({"data/GameData.bin": b"stars: 11"}), "Galaxy.zip", emulator="dolphin")
+    before = here()
+    check("conflict", sync()["state"], "conflict")
+    check("untouched", here(), before)
+    check("RomM's chosen", sync("romm")["state"], "brought")
+    check("now RomM's", here(), {"data/GameData.bin": b"stars: 11"})
+    check("two copies kept", len(os.listdir(copies)), 2)
+
+    # A zip from RomM that would write outside the folder: not taken, nothing touched.
+    before = here()
+    add_save(42, wii_zip({"../../escape.bin": b"x"}), "Galaxy.zip", emulator="dolphin")
+    check("bad zip refused", sync("romm")["state"], "save")
+    check("untouched by it", (here(), os.path.exists(os.path.join(nand, "title", "escape.bin"))), (before, False))
+    check("nothing half-done after it", sorted(os.listdir(os.path.dirname(folder))), ["524d4750"])
+    romm.saves = [x for x in romm.saves if x["rom_id"] != 42]
+    # A cut zip is not taken either.
+    add_save(42, wii_zip({"data/GameData.bin": b"stars: 12"}), "Galaxy.zip", emulator="dolphin")
+    romm.saves[-1]["content_hash"] = "0" * 32
+    check("wrong sum refused", sync("romm")["state"], "unreachable")
+    check("untouched by that", here(), before)
+
+    # A link inside the save: left alone.
+    os.symlink("/etc/passwd", os.path.join(folder, "data", "link"))
+    check("link left alone", sync()["state"], "layout")
+    os.remove(os.path.join(folder, "data", "link"))
+    # Dolphin's memory where only its sandbox knows: not guessed.
+    with open(ini, "w") as f:
+        f.write("[General]\nNANDRootPath = /run/elsewhere/Wii\n")
+    check("unknown memory place", sync()["state"], "layout")
+    os.remove(ini)
+    check("without settings, Dolphin's own place", main._wii_nand(), os.path.realpath(nand))
+    # RetroDECK's saves elsewhere (an SD card): Dolphin's memory there is found too.
+    card = os.path.join(TMP, "card", "retrodeck", "saves")
+    os.makedirs(os.path.join(card, "wii", "dolphin"))
+    rd = os.path.join(home_app, "config", "retrodeck", "retrodeck.json")
+    os.makedirs(os.path.dirname(rd), exist_ok=True)
+    with open(rd, "w") as f:
+        json.dump({"paths": {"saves_path": card}}, f)
+    link = os.path.join(home_app, "data", "dolphin-emu", "Wii")
+    os.remove(link)
+    os.symlink(os.path.join(card, "wii", "dolphin"), link)
+    check("on the card", main._wii_nand(), os.path.realpath(os.path.join(card, "wii", "dolphin")))
+    os.remove(link)
+    os.symlink(nand, link)
+    os.remove(rd)
+    romm.saves = [x for x in romm.saves if x["rom_id"] != 42]
+    run(plugin.game_release(4200))
+    os.remove(rom_file)
+
+
 try:
     test_server()
     test_move_in()
@@ -1794,6 +1951,7 @@ try:
     test_download()
     test_archive()
     test_saves()
+    test_wii_saves()
     test_versions()
     test_bios()
     test_adopt()

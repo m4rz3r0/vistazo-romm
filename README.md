@@ -31,7 +31,7 @@ It does nothing without Vistazo installed.
   they keep their play time, pictures and collections, the games Tender downloaded can be removed from their page, and
   the add-on's own second entries of the same games go away. It can be given back while Tender is still installed.
   Uninstall Tender afterwards from Decky, never with its option to remove all games.
-- **Save games** (DS for now, off until you turn it on). When a game played from its Vistazo entry closes, its save goes
+- **Save games** (DS and Wii for now, off until you turn it on). When a game played from its Vistazo entry closes, its save goes
   to RomM; a newer one on RomM is brought only when the Deck's has not changed, and only after keeping a copy of it.
   When both changed, nothing is touched until you choose on the game's page. A short notice says what happened.
 - **Pictures.** Each entry gets its cover from RomM and, when RomM keeps them, ScreenScraper's wide picture and logo

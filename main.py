@@ -8,6 +8,7 @@ import concurrent.futures
 import datetime
 import hashlib
 import http.client
+import io
 import json
 import os
 import re
@@ -20,6 +21,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 
 import decky
 
@@ -1155,10 +1157,18 @@ SAVE_COPIES = 10  # how many copies of a replaced save stay on the Deck, per gam
 SAVE_COPIES_DIR = ".vistazo-backup"
 SAVE_MOST = 64 * 1024 * 1024
 # Console -> how the saves of the emulator RetroDECK starts by default are filed: the name RomM
-# knows that emulator by, the save file's ending, and RetroArch's own name for the core (its
-# folder when saves are sorted by core). Only what is in use; more as they are needed.
-SAVE_KINDS = {"nds": ("retroarch-melondsds", ".srm", "melonDS DS")}
-RETROARCH_CFG = os.path.join(".var", "app", "net.retrodeck.retrodeck", "config", "retroarch", "retroarch.cfg")
+# knows that emulator by, the ending of what goes to RomM, RetroArch's own name for the core (its
+# folder when saves are sorted by core), and whether the save is a folder (sent as a zip of it).
+# Only what is in use; more as they are needed.
+SAVE_KINDS = {
+    "nds": ("retroarch-melondsds", ".srm", "melonDS DS", False),
+    # Dolphin keeps each Wii game's save as a folder of the console's memory (its NAND).
+    "wii": ("dolphin", ".zip", "Dolphin", True),
+}
+RETRODECK_HOME = os.path.join(".var", "app", "net.retrodeck.retrodeck")
+RETROARCH_CFG = os.path.join(RETRODECK_HOME, "config", "retroarch", "retroarch.cfg")
+DOLPHIN_INI = os.path.join(RETRODECK_HOME, "config", "dolphin-emu", "Dolphin.ini")
+WII_GAMES = "00010000"  # the NAND's folder of disc games' titles
 
 
 def _retrodeck_path(key, fallback):
@@ -1188,15 +1198,71 @@ def _retroarch_flags():
     return flags
 
 
+def _wii_nand():
+    """Dolphin's Wii memory (NAND) as RetroDECK's Dolphin has it set, read the way its sandbox
+    sees it; None when it is somewhere this cannot tell."""
+    home = _home()
+    path = os.path.join(home, RETRODECK_HOME, "data", "dolphin-emu", "Wii")
+    try:
+        with open(os.path.join(home, DOLPHIN_INI), encoding="utf-8", errors="replace") as f:
+            section = ""
+            for line in f:
+                line = line.strip()
+                if line.startswith("["):
+                    section = line
+                elif section == "[General]" and line.partition("=")[0].strip() == "NANDRootPath":
+                    value = line.partition("=")[2].strip()
+                    for inside, outside in (("/var/data/", "data"), ("/var/config/", "config")):
+                        if value.startswith(inside):
+                            value = os.path.join(home, RETRODECK_HOME, outside, value[len(inside):])
+                    if value and not _within(value, home):
+                        return None  # a place only the sandbox knows: not guessed
+                    path = value or path
+    except OSError:
+        pass
+    path = os.path.realpath(path)
+    # In the home, or wherever RetroDECK keeps its saves (an SD card, say).
+    return path if _within(path, home) or _within(path, _retrodeck_path("saves_path", "saves")) else None
+
+
+def _disc_id(path):
+    """The six letters a Wii or GameCube disc is known by ("RMGP01"), read from the game's file
+    (RVZ, WIA, WBFS or a plain image), or None."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(0x1000)
+    except OSError:
+        return None
+    if head[:4] in (b"RVZ\x01", b"WIA\x01"):
+        if head[0x48:0x4C] != b"\x00\x00\x00\x02":
+            return None  # a GameCube disc: its saves are not kept this way
+        found = head[0x58:0x5E]  # the disc's own header, kept whole after the file's
+    elif head[:4] == b"WBFS" and len(head) > 8 and 9 <= head[8] <= 11:
+        found = head[1 << head[8]:(1 << head[8]) + 6]
+    elif head[0x18:0x1C] == b"\x5d\x1c\x9e\xa3":
+        found = head[:6]
+    else:
+        return None
+    found = found.decode("ascii", "replace")
+    return found if re.fullmatch(r"[A-Z0-9]{6}", found) else None
+
+
 def _save_file(game):
     """Where this game's save is on the Deck: (path, kind) or (None, why). The game's file must
-    be here (the save is named after it) and its console one whose saves are known."""
+    be here (the save is named after it, or found through it) and its console one whose saves
+    are known. A save kept as a folder is that folder."""
     kind = SAVE_KINDS.get(_text(game.get("system")))
     rom = game.get("path")
     if not kind:
         return None, "unsupported"
     if not isinstance(rom, str) or not game.get("installed"):
         return None, "not-installed"
+    if kind[3]:
+        nand = _wii_nand()
+        found = _disc_id(rom)
+        if not nand or not found:
+            return None, "layout"
+        return os.path.join(nand, "title", WII_GAMES, found[:4].encode("ascii").hex()), kind
     flags = _retroarch_flags()
     if flags is None or flags.get("savefiles_in_content_dir"):
         return None, "layout"  # saves beside the games, or no settings to read: not handled
@@ -1221,6 +1287,72 @@ def _md5(path):
         for block in iter(lambda: f.read(CHUNK), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _zip_hash(z):
+    """RomM's sum of a zip: of each file inside by its name, not of the zip's own bytes."""
+    lines = []
+    for name in sorted(z.namelist()):
+        if not name.endswith("/"):
+            with z.open(name) as f:
+                digest = hashlib.md5()
+                for block in iter(lambda: f.read(CHUNK), b""):
+                    digest.update(block)
+            lines.append("%s:%s" % (name, digest.hexdigest()))
+    return hashlib.md5("\n".join(lines).encode()).hexdigest()
+
+
+def _folder_files(path):
+    """The files of a save kept as a folder, by their names inside it ("data/x.bin"). A link
+    anywhere in it is not followed: the save is then left alone."""
+    out = {}
+    if os.path.islink(path):
+        raise _Stop("layout")
+    for root, dirs, files in os.walk(path):
+        for name in dirs + files:
+            full = os.path.join(root, name)
+            if os.path.islink(full):
+                raise _Stop("layout")
+            if name in files:
+                out[os.path.relpath(full, path).replace(os.sep, "/")] = full
+    return out
+
+
+def _save_here(path, kind):
+    if kind[3]:
+        return os.path.isdir(path) and not os.path.islink(path) and bool(_folder_files(path))
+    return os.path.isfile(path)
+
+
+def _save_hash(path, kind):
+    """The save's sum the way RomM sums what it is sent (a folder as the zip of it)."""
+    if not kind[3]:
+        return _md5(path)
+    lines = ["%s:%s" % (name, _md5(full)) for name, full in sorted(_folder_files(path).items())]
+    return hashlib.md5("\n".join(lines).encode()).hexdigest()
+
+
+def _save_mtime(path, kind):
+    """When the save last changed: for a folder, its newest file."""
+    if not kind[3]:
+        return os.stat(path).st_mtime_ns
+    return max((os.stat(f).st_mtime_ns for f in _folder_files(path).values()), default=0)
+
+
+def _zip_folder(path):
+    """A save kept as a folder, as one zip to send or keep (the same files give the same sum)."""
+    out = io.BytesIO()
+    total = 0
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+        for name, full in sorted(_folder_files(path).items()):
+            total += os.path.getsize(full)
+            if total > SAVE_MOST:
+                raise _Stop("save")
+            info = zipfile.ZipInfo(name, date_time=time.localtime(os.path.getmtime(full))[:6])
+            info.compress_type = zipfile.ZIP_DEFLATED
+            with open(full, "rb") as f:
+                z.writestr(info, f.read())
+    return out.getvalue()
 
 
 def _when(text):
@@ -1252,15 +1384,18 @@ def _romm_save(server, key, rom_id, kind, stem):
     return (mine[0] if mine else None), None
 
 
-def _copy_aside(path):
+def _copy_aside(path, kind=None):
     """A copy of a save about to be replaced, in a folder beside it; the oldest copies beyond a
     few go, never the one just made. Raises OSError when the copy could not be made: then
-    nothing may be replaced."""
-    folder = os.path.join(os.path.dirname(path), SAVE_COPIES_DIR)
+    nothing may be replaced. A save kept as a folder is copied as a zip of it, beside the
+    console's memory rather than inside it (where the emulator looks for games)."""
+    whole = bool(kind and kind[3])
+    beside = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(path)))) if whole else os.path.dirname(path)
+    folder = os.path.join(beside, SAVE_COPIES_DIR)
     if os.path.islink(folder):
         raise OSError("the copies folder is a link")  # copies must stay beside the save
     os.makedirs(folder, exist_ok=True)
-    stem, ext = os.path.splitext(os.path.basename(path))
+    stem, ext = (os.path.basename(path), ".zip") if whole else os.path.splitext(os.path.basename(path))
     # Named by when it is made, to the millionth of a second: a later copy always sorts later.
     now = time.time()
     stamp, n = time.strftime("%Y%m%d_%H%M%S", time.localtime(now)), int(now % 1 * 1000000)
@@ -1268,8 +1403,19 @@ def _copy_aside(path):
     while os.path.lexists(copy):
         n += 1
         copy = os.path.join(folder, "%s_%s_%06d%s" % (stem, stamp, n, ext))
-    shutil.copy2(path, copy)
-    if os.path.getsize(copy) != os.path.getsize(path) or _md5(copy) != _md5(path):
+    if whole:
+        raw = _zip_folder(path)
+        fd = os.open(copy, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o644)
+        with os.fdopen(fd, "wb") as f:
+            f.write(raw)
+            f.flush()
+            os.fsync(f.fileno())
+        with zipfile.ZipFile(copy) as z:
+            same = _zip_hash(z) == _save_hash(path, kind)
+    else:
+        shutil.copy2(path, copy)
+        same = os.path.getsize(copy) == os.path.getsize(path) and _md5(copy) == _md5(path)
+    if not same:
         os.remove(copy)
         raise OSError("the copy is not the same as the save")
     # Only this game's copies (its name, the date and time, and nothing else), by when they were
@@ -1290,9 +1436,9 @@ def _copy_aside(path):
     return copy
 
 
-def _get_save(server, key, save):
+def _get_save(server, key, save, whole=False):
     """RomM's save, whole and checked: its bytes. Raises _Stop when it did not come whole or
-    there is nothing to check it against."""
+    there is nothing to check it against. `whole`: a folder's zip, summed by what is inside."""
     req, _, ctx = _prepare(server, "GET", "/api/saves/%d/content" % _number(save.get("id")), key["token"], accept="*/*")
     try:
         with _opener(ctx).open(req, timeout=STALL) as r:
@@ -1310,8 +1456,15 @@ def _get_save(server, key, save):
     # there is no telling a whole save from a cut one, and it is not taken.
     if not size and not md5:
         raise _Stop("unreachable")
-    if (size and len(raw) != size) or (md5 and hashlib.md5(raw).hexdigest() != md5):
+    if size and len(raw) != size:
         raise _Stop("unreachable")
+    if md5:
+        try:
+            got = _zip_hash(zipfile.ZipFile(io.BytesIO(raw))) if whole else hashlib.md5(raw).hexdigest()
+        except (zipfile.BadZipFile, OSError, RuntimeError, ValueError):
+            raise _Stop("unreachable")
+        if got != md5:
+            raise _Stop("unreachable")
     return raw
 
 
@@ -1335,14 +1488,65 @@ def _put_save(path, raw):
         raise _Stop("disk")
 
 
-def _send_save(server, key, rom_id, kind, path):
-    """Sends the save to RomM as a new version in the slot. Returns RomM's record of it."""
-    size = os.path.getsize(path)
-    if not 0 < size <= SAVE_MOST:
+def _put_folder(path, raw):
+    """Puts a save kept as a folder in place from its zip, whole or not at all: unpacked beside
+    it first, then swapped in."""
+    try:
+        z = zipfile.ZipFile(io.BytesIO(raw))
+        members = [m for m in z.infolist() if not m.is_dir()]
+    except (zipfile.BadZipFile, ValueError):
         raise _Stop("save")
-    with open(path, "rb") as f:
-        content = f.read()
-    name = os.path.basename(path).replace('"', "").replace("\r", "").replace("\n", "")
+    if not members or sum(m.file_size for m in members) > SAVE_MOST:
+        raise _Stop("save")
+    tmp = "%s.vistazo-part-%d" % (path, os.getpid())
+    old = "%s.vistazo-old-%d" % (path, os.getpid())
+    try:
+        for leftover in (tmp, old):
+            if os.path.lexists(leftover):
+                shutil.rmtree(leftover)
+        os.makedirs(tmp)
+        for m in members:
+            parts = m.filename.split("/")
+            if m.filename.startswith("/") or "\\" in m.filename or any(p in ("", ".", "..") or "\0" in p for p in parts):
+                raise _Stop("save")
+            target = os.path.join(tmp, *parts)
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with z.open(m) as src, open(target, "xb") as out:
+                shutil.copyfileobj(src, out)
+                out.flush()
+                os.fsync(out.fileno())
+        if os.path.lexists(path):
+            os.rename(path, old)
+        try:
+            os.rename(tmp, path)
+        except OSError:
+            if os.path.lexists(old):
+                os.rename(old, path)  # the save that was there goes back where it was
+            raise
+        # The new save is in place: the old folder going is tidying, never a failure.
+        shutil.rmtree(old, ignore_errors=True)
+    except (OSError, zipfile.BadZipFile, RuntimeError) as e:
+        decky.logger.error("Save not written: %s", e)
+        if os.path.lexists(tmp):
+            shutil.rmtree(tmp, ignore_errors=True)
+        raise _Stop("disk")
+    except _Stop:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
+
+
+def _send_save(server, key, rom_id, kind, path, name=""):
+    """Sends the save to RomM as a new version in the slot. Returns RomM's record of it."""
+    if kind[3]:
+        content = _zip_folder(path)
+    else:
+        if not 0 < os.path.getsize(path) <= SAVE_MOST:
+            raise _Stop("save")
+        with open(path, "rb") as f:
+            content = f.read()
+    if not 0 < len(content) <= SAVE_MOST:
+        raise _Stop("save")
+    name = (name or os.path.basename(path)).replace('"', "").replace("\r", "").replace("\n", "")
     edge = "vistazo" + hashlib.sha256(os.urandom(16)).hexdigest()[:24]
     body = (
         ("--%s\r\nContent-Disposition: form-data; name=\"saveFile\"; filename=\"%s\"\r\n"
@@ -1379,35 +1583,40 @@ def _sync_save(server, key, game, choice=""):
     # What was remembered is about one file: with the save now looked for elsewhere (RetroArch
     # sorts them another way), it says nothing about this one.
     last = last if isinstance(last, dict) and last.get("path") == path else {}
-    if os.path.islink(path) or (os.path.lexists(path) and not os.path.isfile(path)):
-        return {"state": "layout"}, None  # a link or a folder where the save should be: left alone
+    if os.path.islink(path) or (os.path.lexists(path) and os.path.isdir(path) != kind[3]):
+        return {"state": "layout"}, None  # a link, or not the shape the save should have: left alone
+    # A folder's save goes to RomM named after the game.
+    name = os.path.splitext(os.path.basename(_text(game.get("path"))))[0] + kind[1] if kind[3] else ""
 
     def remember(save, state):
         return {"state": state}, {
-            "path": path, "hash": _md5(path), "mtime": os.stat(path).st_mtime_ns,
+            "path": path, "hash": _save_hash(path, kind), "mtime": _save_mtime(path, kind),
             "server_id": _number(save.get("id")), "server_updated_at": _text(save.get("updated_at")),
             "server_hash": _text(save.get("content_hash")), "synced_at": int(time.time()),
         }
 
     try:
-        here = os.path.isfile(path)
-        mine = _md5(path) if here else ""
+        here = _save_here(path, kind)
+        mine = _save_hash(path, kind) if here else ""
 
         def bring(state="brought"):
             # RomM's save first, whole and checked: a failed try costs nothing here.
-            raw = _get_save(server, key, theirs)
+            raw = _get_save(server, key, theirs, kind[3])
             # Then the save here once more: if it changed meanwhile (the game was started), or
             # one appeared, it is not what was decided about, and nothing is replaced.
-            now_here = os.path.isfile(path) and not os.path.islink(path)
-            if now_here != here or (now_here and _md5(path) != mine):
+            now_here = _save_here(path, kind) and not os.path.islink(path)
+            if now_here != here or (now_here and _save_hash(path, kind) != mine):
                 return {"state": "busy"}, None
             if here:
-                _copy_aside(path)  # raises when the copy cannot be made: then nothing is replaced
-            _put_save(path, raw)
+                _copy_aside(path, kind)  # raises when the copy cannot be made: then nothing is replaced
+            if kind[3]:
+                _put_folder(path, raw)
+            else:
+                _put_save(path, raw)
             return remember(theirs, state)
 
         def send(state="sent"):
-            return remember(_send_save(server, key, rom_id, kind, path), state)
+            return remember(_send_save(server, key, rom_id, kind, path, name), state)
 
         if not here and not theirs:
             return {"state": "none"}, None
@@ -1430,7 +1639,7 @@ def _sync_save(server, key, game, choice=""):
             return bring()
         if last and mine_changed and not theirs_changed:
             return send()
-        return {"state": "conflict", "deck": int(os.path.getmtime(path)), "romm": int(_when(theirs.get("updated_at")))}, None
+        return {"state": "conflict", "deck": int(_save_mtime(path, kind) / 1e9), "romm": int(_when(theirs.get("updated_at")))}, None
     except _Stop as stop:
         return {"state": str(stop)}, None
     except OSError as e:
@@ -2050,11 +2259,11 @@ class Plugin:
             return {"state": kind}
         changed = False
         try:
-            if os.path.isfile(path):
-                changed = not last or os.stat(path).st_mtime_ns != last.get("mtime")
+            if _save_here(path, kind):
+                changed = not last or _save_mtime(path, kind) != last.get("mtime")
             elif last:
                 changed = True
-        except OSError:
+        except (OSError, _Stop):
             pass
         return {"state": _text(saves.get("state")) or "unknown", "changed": changed}
 
