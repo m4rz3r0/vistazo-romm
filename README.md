@@ -12,6 +12,10 @@ It does nothing without Vistazo installed.
   of it to Steam that this add-on downloads from RomM and starts in RetroDECK, with Vistazo's own page. Removing it
   takes away that entry and only the files the add-on brought. It works next to
   [Tender](https://github.com/danielcopper/romm-tender), which keeps the entries it made.
+- **Taking over from Tender.** Once Tender is turned off in Decky, the add-on's settings can keep Tender's entries:
+  they keep their play time, pictures and collections, the games Tender downloaded can be removed from their page, and
+  the add-on's own second entries of the same games go away. It can be given back while Tender is still installed.
+  Uninstall Tender afterwards from Decky, never with its option to remove all games.
 - **Save games** (DS for now, off until you turn it on). When a game played from its Vistazo entry closes, its save goes
   to RomM; a newer one on RomM is brought only when the Deck's has not changed, and only after keeping a copy of it.
   When both changed, nothing is touched until you choose on the game's page. A short notice says what happened.
@@ -35,7 +39,7 @@ than that is refused and deleted at RomM.
 
 ## Privacy and safety
 
-The add-on talks only to your own RomM server, at the address Tender has, with its own token kept on the Deck for
+The add-on talks only to your own RomM server, at the address in its settings, with its own token kept on the Deck for
 your user only. It never follows a redirect, checks every download against RomM's own sum, and removes only files
 it brought itself. A game starts through a small launcher that Steam hands nothing but the game's number: no file
 name goes through Steam's launch options. No telemetry.
