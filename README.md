@@ -17,9 +17,9 @@ It does nothing without Vistazo installed.
 - **Play time.** Each session of a game played from its entry goes to RomM, with the time played (the Deck's sleep
   left out). Sessions wait on the Deck while RomM is asleep and go once it answers. It needs a token that can also
   write Roms user.
-- **This Deck in RomM.** With a token that can also write Devices, the add-on registers the Deck once in RomM as a
-  "Steam Deck" (no host name, user name or address goes with it), so RomM shows which saves and play sessions came
-  from it. If the device is deleted in RomM, the Deck is registered again.
+- **This device in RomM.** With a token that can also write Devices, the add-on registers the device once in RomM as
+  a "Steam Deck", or as a "PC" with its system's name (no host name, user name or address goes with it), so RomM
+  shows which saves and play sessions came from it. If the device is deleted in RomM, it is registered again.
 - **Games deleted in RomM.** The settings list the entries whose game RomM no longer has, and remove them when you
   say so: only the files the add-on brought go, saves stay.
 - **RetroDECK's folders moved.** When RetroDECK's games or saves folder moves (to the SD card, say, with RetroDECK's

@@ -2534,14 +2534,37 @@ def _play_send():
 
 # ── This Deck as one of the player's devices in RomM ────────────────────────────────────────────
 # RomM keeps a list of each player's devices and marks the saves and play sessions with the one
-# they came from. With a key that may modify devices, the add-on registers this Deck once, as a
-# Steam Deck, and keeps the id RomM gives it beside the address it is for. Nothing that tells who
+# they came from. With a key that may modify devices, the add-on registers this device once, as a
+# Steam Deck or as a PC (with its system's name), and keeps the id RomM gives it beside the address it is for. Nothing that tells who
 # or where goes with it: no host name, user name or network address (RomM matches devices by
 # those, so without them it always makes a new one: the id kept is what stops a second). The id is
 # checked once a run, and when RomM no longer knows it (deleted there) the Deck is registered
 # again. Without the scope, or with RomM not answering, saves and play time go as before.
 DEVICE_FILE = os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "device.json")
-DEVICE_ABOUT = {"name": "Steam Deck", "platform": "SteamOS", "client": "Vistazo RomM"}
+DEVICE_CLIENT = "Vistazo RomM"
+# Valve's own board names for the Steam Deck (LCD and OLED), as the firmware reports them.
+DECK_BOARDS = {"Jupiter", "Galileo"}
+
+
+def _device_about():
+    """What the device is, without who or where: a Steam Deck, or a PC with its system's name."""
+    try:
+        with open("/sys/devices/virtual/dmi/id/product_name", encoding="utf-8") as f:
+            board = f.read().strip()
+    except OSError:
+        board = ""
+    if board in DECK_BOARDS:
+        return {"name": "Steam Deck", "platform": "SteamOS", "client": DEVICE_CLIENT}
+    system = "Linux"
+    try:
+        with open("/etc/os-release", encoding="utf-8") as f:
+            for line in f:
+                key, _, value = line.strip().partition("=")
+                if key == "NAME" and value.strip('"'):
+                    system = value.strip('"')[:40]
+    except OSError:
+        pass
+    return {"name": "PC", "platform": system, "client": DEVICE_CLIENT}
 _device_lock = threading.Lock()
 _device_seen = set()  # (address, key id, device id) RomM confirmed during this run
 
@@ -2589,7 +2612,7 @@ def _device(server, key, gone=None):
                 return None
             if status != 404:
                 return known  # not answering now: still the one to name
-        status, reply = _request(server, "POST", "/api/devices", key["token"], dict(DEVICE_ABOUT))
+        status, reply = _request(server, "POST", "/api/devices", key["token"], _device_about())
         new = reply.get("device_id") if status in (200, 201) and isinstance(reply, dict) else None
         if not _device_id_ok(new):
             return None

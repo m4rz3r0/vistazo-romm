@@ -13,6 +13,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from unittest import mock
 import threading
 import time
 import types
@@ -2635,7 +2636,7 @@ def test_device():
     check("wider still refused", pair("DVCEKEYC", True)["extra"], ["users.write"])
     check("the kept key stays", run(plugin.device_state()), {"allowed": False})
 
-    # A key that may: the Deck is registered once, as a Steam Deck and nothing that tells who or where.
+    # A key that may: the device is registered once, as what it is and nothing that tells who or where.
     romm.codes["DVCEKEYD"] = (83, GAMES + ["roms.user.read", "roms.user.write", "devices.write"])
     check("key with devices paired", pair("DVCEKEYD", True), {"result": "ok", "missing": [], "extra": []})
     check("device allowed", run(plugin.device_state()), {"allowed": True})
@@ -2644,7 +2645,24 @@ def test_device():
     check("sent as the device", sync()["state"], "sent")
     check("registered once", len(registered()), 1)
     device = next(iter(romm.devices))
-    check("registered with nothing personal", romm.devices[device], {"name": "Steam Deck", "platform": "SteamOS", "client": "Vistazo RomM"})
+    check("registered with nothing personal", romm.devices[device], main._device_about())
+    check("only what it is", sorted(romm.devices[device]), ["client", "name", "platform"])
+    # What it is: a Steam Deck by its board's name, any other computer a PC with its system's name.
+    real_open = open
+
+    def fake(board, release):
+        def opener(path, *a, **k):
+            if path == "/sys/devices/virtual/dmi/id/product_name":
+                return io.StringIO(board + "\n")
+            if path == "/etc/os-release":
+                return io.StringIO(release)
+            return real_open(path, *a, **k)
+        return opener
+
+    with mock.patch("builtins.open", fake("Galileo", 'NAME="SteamOS"\n')):
+        check("a Deck is a Steam Deck", main._device_about(), {"name": "Steam Deck", "platform": "SteamOS", "client": "Vistazo RomM"})
+    with mock.patch("builtins.open", fake("MS-7D75", 'NAME="CachyOS Linux"\nID=cachyos\n')):
+        check("another computer is a PC", main._device_about(), {"name": "PC", "platform": "CachyOS Linux", "client": "Vistazo RomM"})
     check("device file private", mode(main.DEVICE_FILE), 0o600)
     with open(main.DEVICE_FILE) as f:
         check("device kept", json.load(f), {"url": URL, "id": device})
