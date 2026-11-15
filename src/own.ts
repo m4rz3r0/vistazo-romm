@@ -175,34 +175,52 @@ function markPicked(appid: number) {
   safe(() => localStorage.setItem(HERO_PICKED, JSON.stringify(all)), undefined);
 }
 
-// With a SteamGridDB key, a hero an earlier version gave from ScreenScraper's fanart (or copied
-// from Tender's) is taken off once per game, so SteamGridDB's comes first; the fanart comes back
-// if SteamGridDB has none. Only when it is that very picture: a hero the player chose stays.
+// The background, in order: SteamGridDB's (with the player's key), RomM's copy of ScreenScraper's
+// fanart when it has none, and Vistazo shows the cover when neither has one. SteamGridDB's replaces
+// the fanart (given by an earlier version, or before the key was there) but no other picture: only
+// when the entry's hero is that very fanart, compared by its bytes. SteamGridDB is asked directly,
+// not through what Steam says the entry has: Steam takes a while to notice a picture changed.
 const fanartHero = callable<[appid: number, romId: number], Reply & { same?: boolean }>("fanart_hero");
-const FANART_CHECKED = "vistazo-romm:fanart-checked";
-async function dropFanart(appid: number, romId: number) {
-  if (!appid || !romId || heroPicked(appid)) return;
-  const checked: Record<string, boolean> = safe(() => JSON.parse(localStorage.getItem(FANART_CHECKED) ?? "{}") ?? {}, {});
-  if (checked[appid] || !(await sgdbOn().catch(() => null))?.on) return;
-  const got = await fanartHero(appid, romId).catch(() => null);
-  if (!got?.ok) return;
-  if (got.same) {
-    safe(() => SteamClient.Apps.ClearCustomArtworkForApp(appid, 1), undefined);
-    // SteamGridDB is asked now, not a day after it was last asked about the game.
-    const asked: Record<string, number> = safe(() => JSON.parse(localStorage.getItem(SGDB_ASKED) ?? "{}") ?? {}, {});
-    delete asked[romId];
-    safe(() => localStorage.setItem(SGDB_ASKED, JSON.stringify(asked)), undefined);
+// appid -> "sgdb" once SteamGridDB's was given (never asked again), or when it was last asked
+// and had none (asked again a day later).
+const SGDB_HERO = "vistazo-romm:sgdb-hero";
+async function sgdbHero(appid: number, romId: number): Promise<boolean> {
+  const done: Record<string, "sgdb" | number> = safe(() => JSON.parse(localStorage.getItem(SGDB_HERO) ?? "{}") ?? {}, {});
+  const mark = (v: "sgdb" | number) => {
+    done[appid] = v;
+    safe(() => localStorage.setItem(SGDB_HERO, JSON.stringify(done)), undefined);
+  };
+  const last = done[appid];
+  if (last === "sgdb") return true;
+  if (typeof last === "number" && Date.now() - last < DAY) return false;
+  if (!(await sgdbOn().catch(() => null))?.on) return false;
+  const mine = safe(() => appStore.GetAppOverviewByAppID(appid), null);
+  const hasHero = !!mine && safe(() => (appStore.GetCustomHeroImageURLs(mine) as string[]).length > 0, true);
+  if (hasHero) {
+    const fanart = await fanartHero(appid, romId).catch(() => null);
+    if (!fanart?.ok) return false;
+    // Another picture (SteamGridDB's from an earlier version, or one the player set in Steam): kept.
+    if (!fanart.same) {
+      mark("sgdb");
+      return true;
+    }
   }
-  checked[appid] = true;
-  safe(() => localStorage.setItem(FANART_CHECKED, JSON.stringify(checked)), undefined);
+  const got = await sgdbPictures(romId, ["hero"]).catch(() => null);
+  if (!got?.ok) return false;
+  if (!got.hero) {
+    mark(Date.now());
+    return false;
+  }
+  // Looked at again: the player may have picked one meanwhile.
+  if (heroPicked(appid)) return true;
+  safe(() => SteamClient.Apps.SetCustomArtworkForApp(appid, got.hero!.data, got.hero!.kind, 1), undefined);
+  mark("sgdb");
+  return true;
 }
 
-// The background, in order: SteamGridDB's (with the player's key), RomM's copy of ScreenScraper's
-// fanart when it has none, and Vistazo shows the cover when neither has one.
 async function fillHero(appid: number, romId: number) {
   if (!appid || !romId || heroPicked(appid)) return;
-  await dropFanart(appid, romId).catch(() => undefined);
-  await sgdbArt(appid, romId).catch(() => undefined);
+  if (await sgdbHero(appid, romId).catch(() => false)) return;
   await rommArt(appid, romId, true);
 }
 
