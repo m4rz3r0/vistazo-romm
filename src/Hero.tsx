@@ -8,14 +8,17 @@ import { HeroChoice, heroChoices, pickHero } from "./own";
 // heroes with the player's key) and "only the cover". The one picked stays: nothing gives another
 // or takes it off.
 const HERO_STYLE = `
-.vr-heroes { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
-.vr-hero.DialogButton { padding: 0; min-width: 0; background: transparent; border-radius: 8px; overflow: hidden;
-  outline: 3px solid transparent; outline-offset: 2px; display: flex; flex-direction: column; }
-.vr-hero.DialogButton.gpfocus, .vr-hero.DialogButton:focus-visible { outline-color: #fff; background: transparent; }
-.vr-hero img, .vr-hero .vr-hero-cover { width: 100%; aspect-ratio: 96 / 31; object-fit: cover; display: block; }
+.vr-heroes { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 12px; }
+.vr-hero.DialogButton { padding: 0 !important; min-width: 0 !important; background: transparent !important;
+  border-radius: 8px; overflow: visible; outline: 3px solid transparent; outline-offset: 3px;
+  display: flex; flex-direction: column; box-shadow: none !important;
+  background-color: transparent !important; background-image: none !important; }
+.vr-hero.DialogButton.gpfocus, .vr-hero.DialogButton:hover { outline-color: #fff; background: transparent !important;
+  background-color: transparent !important; background-image: none !important; }
+.vr-hero img, .vr-hero .vr-hero-cover { width: 100%; aspect-ratio: 96 / 31; object-fit: cover; display: block; border-radius: 8px; }
 .vr-hero .vr-hero-cover { display: flex; align-items: center; justify-content: center; background: #000;
-  color: rgba(255,255,255,0.85); font-size: 15px; }
-.vr-hero span { font-size: 12px; text-align: left; padding: 4px 2px; color: rgba(255,255,255,0.6); }
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.18); color: rgba(255,255,255,0.85); font-size: 15px; }
+.vr-hero span { font-size: 12px; text-align: left; padding: 6px 2px 0; color: rgba(255,255,255,0.6); }
 .vr-hero.gpfocus span { color: #fff; }
 `;
 
@@ -65,7 +68,6 @@ export function HeroModal({ appid, romId, closeModal }: { appid: number; romId: 
           ))}
           <DialogButton className="vr-hero" disabled={busy} onClick={() => pick(null)}>
             <div className="vr-hero-cover">{t.heroCover}</div>
-            <span>Vistazo</span>
           </DialogButton>
         </Focusable>
       )}
