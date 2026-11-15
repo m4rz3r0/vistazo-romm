@@ -181,6 +181,18 @@ async function progress(raId: number, refresh: boolean): Promise<AddonProgress |
   return p;
 }
 
+// The home's count of one of its games: RomM's game and progress only (no pictures, saves or files).
+async function count(appid: number, refresh: boolean): Promise<{ achieved: number; total: number } | null> {
+  const romId = ownedRom(appid);
+  if (!romId) return null;
+  const g = await rommGame(romId).catch(() => null);
+  if (!g?.ok) return null;
+  if (!g.ra_id) return { achieved: 0, total: 0 };
+  const p = await rommProgress(g.ra_id, refresh, true).catch(() => null);
+  if (!p?.ok) return null;
+  return { achieved: Number(p.earned) || 0, total: Number(p.total) || (g.achievements ?? []).length };
+}
+
 // On one of its own games' pages: taking the file off the Deck, when the add-on brought it.
 async function actions(appid: number): Promise<AddonAction[]> {
   if (!ownGames() || !ownedRom(appid)) return [];
@@ -227,6 +239,7 @@ const addon: Addon = {
   shelf: () => (ownGames() ? ownedApps() : []),
   actions,
   progress,
+  count,
   Settings,
 };
 
