@@ -68,8 +68,14 @@ const es = {
     }
   },
   section: "RomM",
+  groupConnection: "Conexión",
+  groupThisGame: "Este juego",
+  groupLibrary: "Biblioteca",
+  groupSaves: "Partidas y BIOS",
+  groupControls: "Controles",
+  groupPictures: "Imágenes",
+  groupTidy: "Mantenimiento",
   needsVistazo: "Este complemento necesita Vistazo: es quien muestra los juegos.",
-  savesLabel: "Partidas guardadas",
   savesDesc: "Al cerrar un juego de DS o de Wii, su partida sube a RomM; si RomM tiene una más nueva y la de la Deck no ha cambiado, se trae, guardando antes una copia. Si cambiaron las dos, no se toca nada hasta que elijas.",
   saveUseRomm: "Usar la partida de RomM",
   saveUseDeck: "Usar la de esta Deck",
@@ -104,8 +110,30 @@ const es = {
   libraryDone: "Biblioteca al día.",
   libraryDrop: "Quitar los no instalados",
   libraryDropped: "Quedan solo los juegos instalados.",
+  biosAllLabel: "BIOS de las consolas",
+  biosAllDesc: "Trae de RomM las BIOS que le faltan a RetroDECK, de todas las consolas de las que RomM tiene juegos. Cada archivo se comprueba y nunca se escribe encima de otro.",
+  biosAllBring: "Traer todas las BIOS",
+  biosAllLooking: "Mirando qué BIOS tiene RomM…",
+  biosAllStep: (n: number, of: number, name: string) => `Trayendo BIOS: ${n} de ${of} (${name})`,
+  biosAllDone: (brought: number, consoles: number) =>
+    !consoles
+      ? "RomM no tiene BIOS de las consolas con juegos."
+      : brought
+        ? `${brought === 1 ? "Traída 1 BIOS" : `Traídas ${brought} BIOS`}. RetroDECK ya tiene todas las de RomM.`
+        : "RetroDECK ya tenía todas las BIOS de RomM.",
+  biosAllBrought: (n: number) => (n === 1 ? "Traída 1 BIOS." : `Traídas ${n} BIOS.`),
+  biosAllFailed: (names: string[]) => `No se pudieron traer: ${names.join(", ")}.`,
+  biosAllUnknown: (names: string[]) => `Sin carpeta conocida en RetroDECK, no se han traído: ${names.join(", ")}.`,
+  biosWhy: (why: string): string | undefined =>
+    (({
+      exists: "Ya había otro archivo con ese nombre en la carpeta de BIOS. No se ha tocado.",
+      damaged: "Lo descargado no coincide con lo que tiene RomM.",
+      retrodeck: "No se encuentra la carpeta de BIOS de RetroDECK.",
+      busy: "Ya se están trayendo.",
+    }) as Record<string, string>)[why],
   emulatorLabel: "Emulador",
   emulatorDefault: "El que elija RetroDECK",
+  emulatorSynced: (name: string) => `Por defecto: ${name}, con partidas en RomM`,
   emulatorDesc: "Con qué emulador arranca este juego.",
   emulatorNoSaves: (name: string) => `Con este, las partidas no se sincronizan con RomM: solo con ${name}.`,
   discLabel: "Disco",
@@ -156,8 +184,6 @@ const es = {
       company: "Compañías",
       mode: "Modos de juego",
     }) as Record<string, string>)[kind] ?? "Otras",
-  ownGamesLabel: "Juegos con Vistazo",
-  ownGamesDesc: "Vistazo descarga e inicia por sí mismo los juegos de RomM que le pases, uno a uno. En pruebas.",
   rommLabelGames: "Conexión con RomM",
   rommUnlinkedGames: "Para ver los juegos, descargarlos y actualizar sus logros, Vistazo necesita su propia clave de RomM.",
   rommLinkedGames: "Conectado: juegos y logros.",
@@ -282,8 +308,14 @@ const en: typeof es = {
     }
   },
   section: "RomM",
+  groupConnection: "Connection",
+  groupThisGame: "This game",
+  groupLibrary: "Library",
+  groupSaves: "Saves and BIOS",
+  groupControls: "Controls",
+  groupPictures: "Pictures",
+  groupTidy: "Upkeep",
   needsVistazo: "This add-on needs Vistazo: it is what shows the games.",
-  savesLabel: "Save games",
   savesDesc: "When a DS or Wii game closes, its save goes to RomM; if RomM has a newer one and the Deck's has not changed, it is brought, keeping a copy first. If both changed, nothing is touched until you choose.",
   saveUseRomm: "Use RomM's save",
   saveUseDeck: "Use this Deck's",
@@ -318,8 +350,30 @@ const en: typeof es = {
   libraryDone: "Library up to date.",
   libraryDrop: "Remove the ones not installed",
   libraryDropped: "Only installed games are left.",
+  biosAllLabel: "Consoles' BIOS files",
+  biosAllDesc: "Brings from RomM the BIOS files RetroDECK lacks, for every console RomM has games of. Each file is checked and never written over another.",
+  biosAllBring: "Bring all BIOS files",
+  biosAllLooking: "Looking at RomM's BIOS files…",
+  biosAllStep: (n: number, of: number, name: string) => `Bringing BIOS files: ${n} of ${of} (${name})`,
+  biosAllDone: (brought: number, consoles: number) =>
+    !consoles
+      ? "RomM has no BIOS files for the consoles with games."
+      : brought
+        ? `${brought === 1 ? "Brought 1 BIOS file" : `Brought ${brought} BIOS files`}. RetroDECK has all of RomM's now.`
+        : "RetroDECK already had all of RomM's BIOS files.",
+  biosAllBrought: (n: number) => (n === 1 ? "Brought 1 BIOS file." : `Brought ${n} BIOS files.`),
+  biosAllFailed: (names: string[]) => `Not brought: ${names.join(", ")}.`,
+  biosAllUnknown: (names: string[]) => `No known folder in RetroDECK, not brought: ${names.join(", ")}.`,
+  biosWhy: (why: string): string | undefined =>
+    (({
+      exists: "Another file with that name was already in the BIOS folder. It was left alone.",
+      damaged: "What was downloaded does not match what RomM has.",
+      retrodeck: "RetroDECK's BIOS folder was not found.",
+      busy: "They are being brought already.",
+    }) as Record<string, string>)[why],
   emulatorLabel: "Emulator",
   emulatorDefault: "Whichever RetroDECK picks",
+  emulatorSynced: (name: string) => `Default: ${name}, saves kept in RomM`,
   emulatorDesc: "Which emulator this game starts with.",
   emulatorNoSaves: (name: string) => `With this one, saves are not kept in step with RomM: only with ${name}.`,
   discLabel: "Disc",
@@ -368,8 +422,6 @@ const en: typeof es = {
       company: "Companies",
       mode: "Game modes",
     }) as Record<string, string>)[kind] ?? "Others",
-  ownGamesLabel: "Games by Vistazo",
-  ownGamesDesc: "Vistazo downloads and starts the RomM games you hand it by itself, one at a time. Experimental.",
   rommLabelGames: "RomM connection",
   rommUnlinkedGames: "To see the games, download them and update their achievements, Vistazo needs its own RomM key.",
   rommLinkedGames: "Connected: games and achievements.",

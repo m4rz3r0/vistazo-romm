@@ -67,6 +67,8 @@ class RomM:
         self.uploads = []  # (query, file name) of each save sent
         self.short_save = False  # send less of a save than announced
         self.firmware = []  # RomM's BIOS files: dicts with "data"
+        self.platforms = []  # RomM's consoles, as /api/platforms answers them
+        self.platforms_down = 0  # a status to answer /api/platforms with instead
         self.meanwhile = None  # called while a save is on its way
         self.collections = {"standard": [], "smart": [], "virtual": {}}  # virtual: sort -> list
         self.collections_down = set()  # "standard", "smart" or a sort: answered with 500
@@ -261,6 +263,8 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(data)
             return
+        if parts == ["api", "platforms"]:
+            return self.reply(romm.platforms_down, {}) if romm.platforms_down else self.reply(200, romm.platforms)
         if parts == ["api", "firmware"]:
             from urllib.parse import parse_qs, urlsplit
             pid = int(parse_qs(urlsplit(self.path).query)["platform_id"][0])
@@ -1543,11 +1547,80 @@ def test_bios():
         f.write(DATA)
     firmware(8, "scph.bin", b"ps2" * 50, platform_id=3)
     run(plugin.game_take(5100, 51))
-    check("in its own folder", (run(plugin.bios_fetch(5100))["state"], os.path.isfile(os.path.join(bios, "pcsx2", "bios", "scph.bin"))), ("ok", True))
+    # PS2's go where PCSX2 is told to look: RetroDECK's BIOS folder unless its settings say otherwise.
+    check("PS2: the BIOS folder itself", (run(plugin.bios_fetch(5100))["state"], os.path.isfile(os.path.join(bios, "scph.bin"))), ("ok", True))
+    os.remove(os.path.join(bios, "scph.bin"))
+    ini = os.path.join(HOME, ".var", "app", "net.retrodeck.retrodeck", "config", "PCSX2", "inis", "PCSX2.ini")
+    os.makedirs(os.path.dirname(ini), exist_ok=True)
+    with open(ini, "w") as f:
+        f.write("[Folders]\nBios = %s\nSnapshots = /x\n" % os.path.join(bios, "pcsx2", "bios"))
+    check("PS2: where PCSX2 looks", (run(plugin.bios_fetch(5100))["state"], os.path.isfile(os.path.join(bios, "pcsx2", "bios", "scph.bin"))), ("ok", True))
+    os.remove(os.path.join(bios, "pcsx2", "bios", "scph.bin"))
+    with open(ini, "w") as f:
+        f.write("[Folders]\nBios = %s\n" % os.path.join(TMP, "pcsx2-own"))
+    check("PS2: never outside RetroDECK's folder", (run(plugin.bios_fetch(5100))["state"], os.path.isfile(os.path.join(bios, "scph.bin")),
+                                                     os.path.exists(os.path.join(TMP, "pcsx2-own"))), ("ok", True, False))
+    os.remove(ini)
     for appid in (5000, 5100):
         run(plugin.game_release(appid))
     os.remove(os.path.join(ROMS, "nds", "Bios.nds"))
     os.remove(os.path.join(ROMS, "ps2", "Bios.iso"))
+
+
+
+def test_bios_all():
+    import hashlib
+    bios = os.path.join(HOME, "retrodeck", "bios")
+    shutil.rmtree(bios)
+    os.makedirs(bios)
+    romm.firmware = []
+
+    def firmware(fid, name, data, platform_id):
+        romm.firmware.append({"id": fid, "platform_id": platform_id, "file_name": name, "file_size_bytes": len(data),
+                              "md5_hash": hashlib.md5(data).hexdigest(), "missing_from_fs": False, "data": data})
+
+    def platform(pid, slug, name, roms, files, fs_slug=None):
+        romm.platforms.append({"id": pid, "slug": slug, "fs_slug": fs_slug or slug, "display_name": name,
+                               "rom_count": roms, "firmware_count": files})
+
+    platform(10, "ps", "PlayStation", 5, 2, fs_slug="psx")
+    firmware(20, "scph5501.bin", b"psx-us" * 100, 10)
+    firmware(21, "scph1001.bin", b"psx-old" * 100, 10)
+    platform(11, "dc", "Dreamcast", 1, 2)
+    firmware(22, "dc_boot.bin", b"boot" * 100, 11)
+    firmware(23, "dc_flash.bin", b"flash" * 100, 11)
+    platform(12, "saturn", "Saturn", 0, 1)  # no games: not asked
+    firmware(24, "sega_101.bin", b"sat" * 100, 12)
+    platform(13, "ngc", "GameCube", 3, 1)  # its folder in RetroDECK is not known
+    firmware(25, "IPL.bin", b"gc" * 100, 13)
+    platform(14, "segacd", "Mega-CD", 2, 0)  # RomM has no BIOS for it
+    platform(15, "tg16", "PC Engine", 2, 1)  # the same file as another console's, already brought
+    firmware(26, "scph5501.bin", b"psx-us" * 100, 15)
+    with open(os.path.join(bios, "scph1001.bin"), "wb") as f:
+        f.write(b"psx-old" * 100)
+    romm.firmware[3]["data"] = b"FLASH" * 100  # RomM's sum will not match
+    got = run(plugin.bios_all())
+    check("all consoles: one failed", got, {"state": "missing", "consoles": 3, "files": 5, "brought": 3,
+                                            "failed": ["dc_flash.bin"], "unknown": ["GameCube"], "why": "damaged"})
+    check("progress at the end", run(plugin.bios_all_state()), {"state": "missing", "done": 4, "total": 4, "file": "scph5501.bin"})
+    check("each in RetroDECK's folder for it", (open(os.path.join(bios, "scph5501.bin"), "rb").read(),
+                                                os.path.isfile(os.path.join(bios, "dc", "dc_boot.bin")),
+                                                os.path.exists(os.path.join(bios, "dc", "dc_flash.bin"))), (b"psx-us" * 100, True, False))
+    check("not asked: consoles without games or BIOS", [c[1] for c in romm.calls if "platform_id=12" in c[1] or "platform_id=14" in c[1]], [])
+    check("nothing half-done", [n for _, _, fs in os.walk(bios) for n in fs if "vistazo-part" in n], [])
+    check("the one already there, not asked for", [c for c in romm.calls if "/api/firmware/21/content/" in c[1]], [])
+    romm.firmware[3]["data"] = b"flash" * 100
+    check("again: the rest", run(plugin.bios_all()), {"state": "ok", "consoles": 3, "files": 5, "brought": 1, "failed": [], "unknown": ["GameCube"]})
+    check("and again: nothing to bring", (run(plugin.bios_all())["brought"], run(plugin.bios_all_state())), (0, {"state": "ok", "done": 0, "total": 0, "file": ""}))
+    main._bios_all_job["state"] = "running"
+    check("one at a time", run(plugin.bios_all()), {"state": "busy"})
+    main._bios_all_job["state"] = "ok"
+    romm.platforms_down = 500
+    check("RomM not answering", run(plugin.bios_all()), {"state": "unreachable"})
+    romm.platforms_down = 403
+    check("RomM refusing", run(plugin.bios_all()), {"state": "refused"})
+    romm.platforms_down = 0
+    romm.platforms, romm.firmware = [], []
 
 
 def test_saves():
@@ -2208,13 +2281,16 @@ b</command>
               "%EMULATOR_RETROARCH% -L %CORE_RETROARCH%/desmume_libretro.so %ROM%", target])
     # Saves are kept in step only with the emulator whose saves are known.
     check("saves not with another emulator", run(plugin.save_sync(4300))["state"], "emulator")
-    check("back to RetroDECK's", run(plugin.game_set_emulator(4300, "")), {"ok": True, "chosen": ""})
+    check("back to the default", run(plugin.game_set_emulator(4300, "")), {"ok": True, "chosen": ""})
+    # Nothing chosen: a console whose saves are kept in step starts with the emulator whose saves
+    # those are, not with whatever RetroDECK lists first (DeSmuME, on a fresh RetroDECK).
+    melon = "%EMULATOR_RETROARCH% -L %CORE_RETROARCH%/melondsds_libretro.so %ROM%"
     with open(main.LAUNCH_FILE) as f:
-        check("plain again", json.load(f)["43"], target)
+        check("the default is the one whose saves are kept", json.load(f)["43"], {"path": target, "emulator": melon})
     os.remove(seen)
     subprocess.run([main.LAUNCHER, "43"], env=env, capture_output=True, text=True)
     with open(seen) as f:
-        check("started as before", json.load(f), ["run", "net.retrodeck.retrodeck", target])
+        check("started with it", json.load(f), ["run", "net.retrodeck.retrodeck", "-e", melon, target])
     check("the old 'another emulator' state is not kept", run(plugin.save_state(4300))["state"], "unknown")
     check("saves again", run(plugin.save_sync(4300))["state"] != "emulator", True)
     # A list where the emulator is not a plain line is not believed.
@@ -2234,8 +2310,30 @@ b</command>
         check("plain file without ES-DE's list", json.load(f)["43"], target)
     os.chmod(es, 0o644)
     main._es_cache.clear()
+    # A console without saves kept in step still starts as RetroDECK decides.
+    run(plugin.game_set_emulator(4300, ""))
+    data = main._read_games()
+    data["games"]["4300"]["system"] = "gba"
+    check("list written", main._write_games(data), True)
+    with open(main.LAUNCH_FILE) as f:
+        check("plain for a console without saves kept", json.load(f)["43"], target)
+    data["games"]["4300"]["system"] = "nds"
+    main._write_games(data)
+    # A RetroDECK whose list lacks that emulator: started as it decides, and saves are not touched.
+    with open(es) as f:
+        text = f.read()
+    with open(es, "w") as f:
+        f.write(text.replace('label="melonDS DS"', 'label="Old melonDS"'))
+    main._es_cache.clear()
+    main._write_games(main._read_games())
+    with open(main.LAUNCH_FILE) as f:
+        check("plain without that emulator", json.load(f)["43"], target)
+    check("no saves then", run(plugin.save_sync(4300))["state"], "emulator")
     run(plugin.game_release(4300))
     os.remove(target)
+    # Later checks start without ES-DE's list, as a Deck without RetroDECK would.
+    os.remove(es)
+    main._es_cache.clear()
 
 
 def test_moved_folders():
@@ -2717,6 +2815,7 @@ try:
     test_emulators()
     test_versions()
     test_bios()
+    test_bios_all()
     test_adopt()
     test_play()
     test_gone()

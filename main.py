@@ -334,15 +334,27 @@ def _read_games():
     return {"version": 1, "games": {}}
 
 
+def _start_with(game):
+    """RetroDECK's command for the emulator this game starts with, or None to let RetroDECK pick.
+    The player's choice first; with none, a console whose saves are kept in step starts with the
+    emulator whose saves those are: RetroDECK would otherwise take the first of ES-DE's list (on a
+    fresh RetroDECK, DeSmuME for the DS, whose saves are not those)."""
+    found = _emulators(_text(game.get("system")))
+    chosen = _text(game.get("emulator"))
+    if chosen and chosen in found:
+        return found[chosen]
+    return found.get(SAVE_EMULATORS.get(_text(game.get("system")), ""))
+
+
 def _write_games(data):
     """The games file and, from it, the launcher's list: game number in RomM -> its file, or
-    its file and the emulator chosen for it (RetroDECK's own command for that emulator)."""
+    its file and the emulator it starts with (RetroDECK's own command for that emulator)."""
     if not _write_private(GAMES_FILE, data):
         return False
     table = {}
     for game in data["games"].values():
         if isinstance(game, dict) and game.get("installed") and isinstance(game.get("path"), str):
-            command = _emulators(_text(game.get("system"))).get(_text(game["emulator"])) if game.get("emulator") else None
+            command = _start_with(game)
             table[str(game.get("rom_id"))] = {"path": game["path"], "emulator": command} if command else game["path"]
             disc = _disc_path(game)  # another disc chosen: the launcher also checks it is in the game's folder
             if disc:
@@ -1570,8 +1582,13 @@ def _save_file(game):
     if not isinstance(rom, str) or not game.get("installed"):
         return None, "not-installed"
     chosen, system = _text(game.get("emulator")), _text(game.get("system"))
-    # Only when the game really starts with another emulator (a choice RetroDECK no longer has falls back to its own).
-    if chosen and chosen != SAVE_EMULATORS.get(system) and chosen in _emulators(system):
+    found = _emulators(system)
+    # Only when the game really starts with another emulator (a choice RetroDECK no longer has falls
+    # back to the default), or when ES-DE's list lacks the one whose saves are kept, so RetroDECK
+    # picks. ES-DE's list unreadable: what it starts with is not known, the saves go on as before.
+    if chosen and chosen != SAVE_EMULATORS.get(system) and chosen in found:
+        return None, "emulator"
+    if found and SAVE_EMULATORS.get(system) not in found and not (chosen and chosen in found):
         return None, "emulator"
     if kind[3]:
         nand = _wii_nand()
@@ -2126,8 +2143,45 @@ def _sync_save(server, key, game, choice=""):
 # checked against RomM's own sum, never over a file that is already there.
 BIOS_MOST = 256 * 1024 * 1024
 BIOS_DEPTH = 3  # how deep in RetroDECK's BIOS folder a file is looked for by name
-# Console -> the folder inside RetroDECK's BIOS folder where its files go ("" is the folder itself).
-BIOS_FOLDERS = {"nds": "", "wii": "", "ps2": "pcsx2/bios", "psp": "", "n3ds": ""}
+# Console (RetroDECK's name for it) -> the folder inside RetroDECK's BIOS folder where its files go
+# ("" is the folder itself). Taken from RetroDECK's own list of BIOS files, in each component's
+# component_manifest.json: nearly all go in the folder itself, Flycast's in "dc" and PICO-8's in
+# "pico-8". PS2's go wherever PCSX2 is told to look (_bios_folder). Left out on purpose: the
+# GameCube's (Dolphin wants them among the saves, one folder per region) and MAME's arcade sets.
+BIOS_FOLDERS = {
+    "nds": "", "wii": "", "ps2": "", "psp": "", "n3ds": "",
+    "psx": "", "saturn": "", "segacd": "", "sega32x": "", "megadrive": "", "mastersystem": "", "gamegear": "",
+    "dreamcast": "dc", "naomi": "dc", "atomiswave": "dc",
+    "pcengine": "", "pcenginecd": "", "pcfx": "", "3do": "", "neogeo": "", "neogeocd": "", "ngp": "", "ngpc": "",
+    "gb": "", "gbc": "", "gba": "", "nes": "", "fds": "", "snes": "", "satellaview": "", "sufami": "", "n64dd": "",
+    "pokemini": "", "atari5200": "", "atari7800": "", "atari800": "", "atarilynx": "", "atarijaguar": "",
+    "atarist": "", "colecovision": "", "intellivision": "", "odyssey2": "", "videopac": "", "vectrex": "",
+    "channelf": "", "scv": "", "vsmile": "", "cdimono1": "", "amiga": "", "c64": "", "amstradcpc": "", "msx": "",
+    "pc88": "", "pc98": "", "x68000": "", "zxspectrum": "", "apple2": "", "apple2gs": "", "macintosh": "",
+    "enterprise": "", "j2me": "", "xbox": "", "pico8": "pico-8",
+}
+# RomM's platform -> RetroDECK's console, for the BIOS files only: wider than SYSTEMS, since a
+# console's BIOS is worth having before Vistazo knows where its games go.
+BIOS_SYSTEMS = {
+    **SYSTEMS,
+    "psx": "psx", "ps": "psx", "saturn": "saturn", "segacd": "segacd", "sega32": "sega32x", "genesis": "megadrive",
+    "sms": "mastersystem", "gamegear": "gamegear", "dc": "dreamcast", "naomi": "naomi", "naomi2": "naomi",
+    "naomigd": "naomi", "atomiswave": "atomiswave", "tg16": "pcengine", "turbografx-cd": "pcenginecd",
+    "pc-fx": "pcfx", "3do": "3do", "neogeoaes": "neogeo", "neogeomvs": "neogeo", "neo-geo-cd": "neogeocd",
+    "neo-geo-pocket": "ngp", "neo-geo-pocket-color": "ngpc", "gb": "gb", "gbc": "gbc", "gba": "gba", "nes": "nes",
+    "fds": "fds", "snes": "snes", "satellaview": "satellaview", "sufami-turbo": "sufami", "64dd": "n64dd",
+    "pokemon-mini": "pokemini", "atari5200": "atari5200", "atari7800": "atari7800", "atari800": "atari800",
+    "atari8bit": "atari800", "lynx": "atarilynx", "jaguar": "atarijaguar", "atari-st": "atarist",
+    "colecovision": "colecovision", "intellivision": "intellivision", "odyssey-2": "odyssey2",
+    "videopac-g7400": "videopac", "vectrex": "vectrex", "fairchild-channel-f": "channelf",
+    "epoch-super-cassette-vision": "scv", "vsmile": "vsmile", "philips-cd-i": "cdimono1", "amiga": "amiga",
+    "c64": "c64", "acpc": "amstradcpc", "msx": "msx", "msx2": "msx", "msx2plus": "msx",
+    "pc-8800-series": "pc88", "pc-9800-series": "pc98", "sharp-x68000": "x68000", "zxs": "zxspectrum",
+    "appleii": "apple2", "apple-iigs": "apple2gs", "mac": "macintosh", "enterprise": "enterprise",
+    "j2me": "j2me", "xbox": "xbox", "pico": "pico8",
+}
+PCSX2_INI = os.path.join(".var", "app", "net.retrodeck.retrodeck", "config", "PCSX2", "inis", "PCSX2.ini")
+_bios_all_job = {"state": "idle"}  # bringing every console's BIOS: see bios_all
 
 
 def _bios_names(root):
@@ -2187,10 +2241,92 @@ def _bios_check(server, key, game):
     return {"state": state, "files": len(files), "missing": [f["name"] for f in missing]}, missing
 
 
+def _bios_folder(root, system):
+    """Where one console's BIOS files go. PS2's: the folder PCSX2's settings name, when it is
+    RetroDECK's BIOS folder or inside it (RetroDECK tells PCSX2 the folder itself)."""
+    if system == "ps2":
+        try:
+            with open(os.path.join(_home(), PCSX2_INI), encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    name, _, value = line.partition("=")
+                    if name.strip() == "Bios" and os.path.isabs(value.strip()):
+                        told = os.path.realpath(value.strip())
+                        if told == root or _within(told, root):
+                            return told
+                        break
+        except OSError:
+            pass
+    return os.path.join(root, *[p for p in BIOS_FOLDERS[system].split("/") if p])
+
+
+def _bios_platforms(server, key):
+    """RomM's consoles with games and BIOS files: ([{"id", "system", "name"}], [names of the ones
+    whose BIOS folder in RetroDECK is not known], None) or (None, None, why)."""
+    status, platforms = _request(server, "GET", "/api/platforms", key["token"])
+    if status == 401:
+        _forget_key()
+    if status in (401, 403):
+        return None, None, "refused"
+    if status != 200 or not isinstance(platforms, list):
+        return None, None, "unreachable"
+    known, unknown = [], []
+    for p in platforms:
+        if not isinstance(p, dict) or _number(p.get("id")) <= 0 or _number(p.get("rom_count")) <= 0:
+            continue
+        # RomM says how many BIOS files each console has; one that says none is not asked.
+        if ("firmware" in p or "firmware_count" in p) and not p.get("firmware") and _number(p.get("firmware_count")) <= 0:
+            continue
+        name = _text(p.get("display_name")) or _text(p.get("name")) or _text(p.get("slug"))
+        system = BIOS_SYSTEMS.get(_text(p.get("slug"))) or BIOS_SYSTEMS.get(_text(p.get("fs_slug")))
+        if system in BIOS_FOLDERS:
+            known.append({"id": _number(p["id"]), "system": system, "name": name})
+        else:
+            unknown.append(name)
+    return known, unknown, None
+
+
+def _bios_all(server, key, job):
+    """Every BIOS file RomM has for its consoles with games that RetroDECK lacks, one at a time,
+    each as _bios_bring brings it. Keeps `job` up to date for bios_all_state."""
+    platforms, unknown, why = _bios_platforms(server, key)
+    if platforms is None:
+        return {"state": why}
+    root = _retrodeck_path("bios_path", "bios")
+    wanted = []
+    for p in platforms:
+        files, why = _bios_list(server, key, p["id"])
+        if files is None:
+            return {"state": why}
+        wanted += [(p, f) for f in files]
+
+    def here():
+        return _bios_names(root) if os.path.isdir(root) else {}
+
+    known = here()
+    missing = [(p, f) for p, f in wanted if f["size"] not in known.get(f["name"].lower(), ())]
+    job.update(done=0, total=len(missing), file="")
+    brought, failed, why = 0, [], None
+    for p, f in missing:
+        job["file"] = f["name"]
+        # The same file for two consoles, brought for the first one, counts for the second.
+        if f["size"] in here().get(f["name"].lower(), ()):
+            brought += 1
+        else:
+            try:
+                _bios_bring(server, key, p["system"], f)
+                brought += 1
+            except _Stop as stop:
+                why = str(stop)
+                failed.append(f["name"])
+        job["done"] += 1
+    return {"state": "missing" if failed else "ok", "consoles": len(platforms), "files": len(wanted),
+            "brought": brought, "failed": failed, "unknown": unknown, **({"why": why} if why else {})}
+
+
 def _bios_bring(server, key, system, f):
     """One BIOS file into its folder, whole and checked, or not at all."""
     root = _retrodeck_path("bios_path", "bios")
-    folder = os.path.join(root, *[p for p in BIOS_FOLDERS[system].split("/") if p])
+    folder = _bios_folder(root, system)
     # Checked before anything is made: a link on the way must not lead outside.
     probe = folder
     while not os.path.lexists(probe) and probe != os.path.dirname(probe):
@@ -2841,6 +2977,32 @@ class Plugin:
         finally:
             _saving.discard(appid)
 
+    async def bios_all(self):
+        """Brings, for every console RomM has games of, the BIOS files RetroDECK lacks (see
+        _bios_all): {"state": "ok" | "missing", "consoles", "files", "brought", "failed": [names],
+        "unknown": [consoles whose BIOS folder is not known], "why"?} or {"state": why}.
+        bios_all_state says how far it has got meanwhile."""
+        server, key = _games_key()
+        if not server:
+            return {"state": key}
+        with _lock:
+            if _bios_all_job.get("state") == "running":
+                return {"state": "busy"}
+            _bios_all_job.clear()
+            _bios_all_job.update(state="running", done=0, total=0, file="")
+        out = {"state": "error"}
+        try:
+            out = await asyncio.get_running_loop().run_in_executor(None, _bios_all, server, key, _bios_all_job)
+            return out
+        finally:
+            with _lock:
+                _bios_all_job["state"] = out.get("state", "error")
+
+    async def bios_all_state(self):
+        """How far bios_all has got: {"state", "done", "total", "file"} (state "running" meanwhile)."""
+        with _lock:
+            return {k: _bios_all_job.get(k, d) for k, d in (("state", "idle"), ("done", 0), ("total", 0), ("file", ""))}
+
     async def save_sync(self, appid, choice=""):
         """Brings this game's save in step with RomM (see _sync_save). Never while a download of
         the game is under way; the frontend never asks while the game is running."""
@@ -3473,7 +3635,8 @@ class Plugin:
 
     async def game_emulators(self, appid):
         """The emulators RetroDECK has for this game's console: {"ok": True, "emulators": [name],
-        "chosen": name ("" when RetroDECK decides), "saves": the one whose saves are kept in step}."""
+        "chosen": name ("" for the default: the one whose saves are kept in step when ES-DE lists
+        it, else RetroDECK's pick), "saves": the one whose saves are kept in step, when listed}."""
         appid = _number(appid)
         with _lock:
             game = _read_games()["games"].get(str(appid))
@@ -3484,8 +3647,9 @@ class Plugin:
         if not names:
             return {"ok": False, "why": "system"}
         chosen = _text(game.get("emulator"))
+        saves = SAVE_EMULATORS.get(system, "")
         return {"ok": True, "emulators": names, "chosen": chosen if chosen in names else "",
-                "saves": SAVE_EMULATORS.get(system, "")}
+                "saves": saves if saves in names else ""}
 
     async def game_set_emulator(self, appid, name):
         """Starts this game with that emulator from now on ("": as RetroDECK decides)."""

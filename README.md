@@ -8,7 +8,7 @@ It does nothing without Vistazo installed.
 
 - **Fresh achievements.** When a retro game closes, RomM reads your RetroAchievements again and Vistazo's page shows
   them at once.
-- **Games by Vistazo** (experimental, off until you turn it on). From a game's page, the settings add a second entry
+- **Games by Vistazo.** From a game's page, the settings add a second entry
   of it to Steam that this add-on downloads from RomM and starts in RetroDECK, with Vistazo's own page. Removing it
   takes away that entry and only the files the add-on brought. It works next to
   [Tender](https://github.com/danielcopper/romm-tender), which keeps the entries it made.
@@ -30,8 +30,11 @@ It does nothing without Vistazo installed.
   installed game gets the other version brought first (the old one plays meanwhile); its save goes with it when the
   new version has none, the old save stays as it is, and the old file goes only if the add-on brought it.
 - **Emulator of a game.** The panel, with the game's page open, picks which of RetroDECK's emulators for its console
-  the entry starts (RetroDECK's own list and commands), or leaves it to RetroDECK. Save games are kept in step only
-  with the usual one (melonDS DS for DS, Dolphin standalone for Wii); the panel says so when another is picked.
+  the entry starts (RetroDECK's own list and commands). Save games are kept in step only with one emulator per
+  console (melonDS DS for DS, Dolphin standalone for Wii), so with nothing picked those consoles start with it, even
+  where RetroDECK would take another: a fresh RetroDECK starts DS games with DeSmuME, whose saves are not RomM's.
+  An alternative emulator set in ES-DE does not apply to these entries; pick it here instead. Other consoles start
+  as RetroDECK decides. The panel says when the emulator picked does not keep its saves in step.
 - **Disc of a game.** For a game of several discs, the panel, with the game's page open, picks which disc the entry
   starts, or all of them through a playlist so the emulator changes discs itself (RomM's playlist, or one the add-on
   makes in the game's folder and removes with the game). Nothing chosen starts the game as before.
@@ -49,7 +52,7 @@ It does nothing without Vistazo installed.
   they keep their play time, pictures and collections, the games Tender downloaded can be removed from their page, and
   the add-on's own second entries of the same games go away. It can be given back while Tender is still installed.
   Uninstall Tender afterwards from Decky, never with its option to remove all games.
-- **Save games** (DS and Wii for now, off until you turn it on). When a game played from its Vistazo entry closes, its save goes
+- **Save games** (DS and Wii for now). When a game played from its Vistazo entry closes, its save goes
   to RomM; a newer one on RomM is brought only when the Deck's has not changed, and only after keeping a copy of it.
   When both changed, nothing is touched until you choose on the game's page. A short notice says what happened.
 - **Pictures.** Each entry gets its cover from RomM and, when RomM keeps them, ScreenScraper's wide picture and logo
@@ -60,7 +63,16 @@ It does nothing without Vistazo installed.
   picture, hero and logo, and the icon of a new entry. A picture RomM or you already gave is never replaced, and a game
   whose name matches none or several games on SteamGridDB gets nothing rather than another game's pictures.
 - **BIOS files.** The game's page says whether the BIOS files RomM has for its console are on the Deck, and brings the
-  missing ones, checked against RomM's sums.
+  missing ones, checked against RomM's sums. *Bring all BIOS files*, in the settings, does the same at once for every
+  console RomM has games of, with how far it has got. Each file goes where RetroDECK's own list of BIOS files puts it
+  (most in its BIOS folder, the Dreamcast's in `dc`, PICO-8's in `pico-8`, the PS2's where PCSX2 is told to look) and is
+  never written over another. The GameCube's and MAME's arcade sets are left alone.
+
+## Settings
+
+In Vistazo's settings, under RomM, or in the add-on's own panel, by topic: **Connection**, **This game** (with a game's
+page open), **Library**, **Saves and BIOS**, **Controls**, **Pictures** and **Upkeep** (shown only when there is
+something to tidy up). Games by Vistazo and keeping saves in step are always on.
 
 ## Connecting to RomM
 

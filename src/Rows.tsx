@@ -1,46 +1,64 @@
 import { ButtonItem, ConfirmModal, DropdownItem, PanelSection, PanelSectionRow, TextField, ToggleField, showModal } from "@decky/ui";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { t } from "./i18n";
 import { GameState, RommCollection, Version, busyJob, gameEmulators, setEmulator, cancelOwn, clearGone, goneOwn, pauseOwn, playState, gameVersions, running, switchVersion, TenderGame, addOwn, rommCollections, turnCollection, giveBackTender, takeOverTender, tenderGames, tenderOn, clearLostOwn, dropNotInstalled, gameState, loadOwned, lostOwn, onOwnChange, ownedApp, ownedRom, removeOwn, retryOwn, syncLibrary } from "./own";
+import { BIOS_EVENT, BiosAllAnswer, biosAll, biosAllState } from "./own";
 import { Disc, deviceState, gameDiscs, setDisc } from "./own";
 import { openGame } from "./page";
 import { SgdbRow } from "./Sgdb";
 import { InputRows } from "./InputRow";
 import { PairAnswer, RommHealth, ServerAnswer, checkRomm, pairRomm, rommServer, setRommServer, unlinkRomm, useRomm } from "./romm";
-import { LANGUAGES, setOwnGames, setPreferredLanguage, setSyncSaves, useOwnGames, usePreferredLanguage, useSyncSaves } from "./settings";
+import { LANGUAGES, setPreferredLanguage, usePreferredLanguage } from "./settings";
 
 declare const appStore: any;
 
-// The add-on's rows, shown inside Vistazo's settings and in its own Quick Access panel: the RomM
-// connection, the switch that lets it look after games, and what to do with the game whose page
-// is open.
+// The add-on's rows, shown inside Vistazo's settings and in its own Quick Access panel, by topic:
+// the connection first, then the game whose page is open, the library, saves and BIOS, controls,
+// pictures, and last what is left to tidy up. A group with nothing to show today (no game page open,
+// nothing to tidy) hides whole, title included.
 export function Settings() {
-  const games = useOwnGames();
-  const saves = useSyncSaves();
   return (
-    <PanelSection title={t.section}>
-      <PanelSectionRow>
-        <ToggleField label={t.ownGamesLabel} description={t.ownGamesDesc} checked={games} onChange={setOwnGames} />
-      </PanelSectionRow>
-      <ServerRow />
-      <RommRow games={games} />
-      {games && (
+    <>
+      <style>{`.vr-group:not(:has([tabindex])) { display: none; }`}</style>
+      <Group title={t.groupConnection}>
+        <ServerRow />
+        <RommRow games />
+        <PlayRow />
+        <DeviceRow />
+      </Group>
+      <Group title={t.groupThisGame}>
+        <OwnRow />
+      </Group>
+      <Group title={t.groupLibrary}>
+        <LibraryRow />
+        <CollectionsRow />
+        <LanguageRow />
+      </Group>
+      <Group title={t.groupSaves}>
         <PanelSectionRow>
-          <ToggleField label={t.savesLabel} description={t.savesDesc} checked={saves} onChange={setSyncSaves} />
+          <div style={{ fontSize: 12, lineHeight: 1.45, opacity: 0.7 }}>{t.savesDesc}</div>
         </PanelSectionRow>
-      )}
-      {games && <TenderRow />}
-      {games && <LanguageRow />}
-      {games && <SgdbRow />}
-      {games && <InputRows />}
-      {games && <LibraryRow />}
-      {games && <CollectionsRow />}
-      {games && <OwnRow />}
-      {games && <LostRow />}
-      {games && <GoneRow />}
-      {games && <PlayRow />}
-      {games && <DeviceRow />}
-    </PanelSection>
+        <BiosRow />
+      </Group>
+      <Group title={t.groupControls}>
+        <InputRows />
+      </Group>
+      <Group title={t.groupPictures}>
+        <SgdbRow />
+      </Group>
+      <Group title={t.groupTidy}>
+        <TenderRow />
+        <LostRow />
+        <GoneRow />
+      </Group>
+    </>
+  );
+}
+function Group({ title, children }: { title: string; children: any }) {
+  return (
+    <div className="vr-group">
+      <PanelSection title={title}>{children}</PanelSection>
+    </div>
   );
 }
 
@@ -146,6 +164,66 @@ function LibraryRow() {
         </ButtonItem>
       </PanelSectionRow>
     </>
+  );
+}
+
+// Every console's BIOS files at once: the ones RomM has and RetroDECK lacks, for each console RomM
+// has games of, each checked as from a game's page. The row says how far it has got, also when the
+// panel is opened again meanwhile.
+function BiosRow() {
+  const status = useRomm();
+  const [busy, setBusy] = useState(false);
+  const [said, setSaid] = useState<string | null>(null);
+  const mine = useRef(false); // started from this row, so its answer comes here
+  useEffect(() => {
+    biosAllState()
+      .then((s) => s.state === "running" && setBusy(true))
+      .catch(() => undefined);
+  }, []);
+  useEffect(() => {
+    if (!busy) return;
+    const timer = setInterval(() => {
+      biosAllState()
+        .then((s) => {
+          if (s.state === "running") setSaid(s.total ? t.biosAllStep(Math.min(s.done + 1, s.total), s.total, s.file) : t.biosAllLooking);
+          else if (!mine.current) {
+            setBusy(false);
+            setSaid(null);
+          }
+        })
+        .catch(() => undefined);
+    }, 700);
+    return () => clearInterval(timer);
+  }, [busy]);
+  if (status !== "linked") return null;
+  const why = (w: string) => t.biosWhy(w) ?? t.ownWhy(w);
+  const summary = (a: BiosAllAnswer) => {
+    if (a.state !== "ok" && a.state !== "missing") return why(a.state);
+    const parts = a.failed?.length
+      ? [a.brought ? t.biosAllBrought(a.brought) : "", t.biosAllFailed(a.failed), a.why ? why(a.why) : ""]
+      : [t.biosAllDone(a.brought ?? 0, a.consoles ?? 0)];
+    if (a.unknown?.length) parts.push(t.biosAllUnknown(a.unknown));
+    return parts.filter(Boolean).join(" ");
+  };
+  const bring = () => {
+    mine.current = true;
+    setBusy(true);
+    setSaid(t.biosAllLooking);
+    biosAll()
+      .catch(() => ({ state: "error" }) as BiosAllAnswer)
+      .then((a) => {
+        mine.current = false;
+        setBusy(false);
+        setSaid(summary(a));
+        if (a.brought) window.dispatchEvent(new Event(BIOS_EVENT));
+      });
+  };
+  return (
+    <PanelSectionRow>
+      <ButtonItem layout="below" label={t.biosAllLabel} description={said ?? t.biosAllDesc} disabled={busy} onClick={bring}>
+        {t.biosAllBring}
+      </ButtonItem>
+    </PanelSectionRow>
   );
 }
 
@@ -566,8 +644,9 @@ function LostRow() {
   );
 }
 
-// The emulator the open game starts with: RetroDECK's choice, or one of ES-DE's for its console.
-// Saves are kept in step only with the one whose saves the add-on knows: said when another is picked.
+// The emulator the open game starts with: one of ES-DE's for its console, or the default (the one
+// whose saves the add-on keeps in step, for consoles that have one; RetroDECK's pick otherwise).
+// Saves are kept in step only with that one: said when another is picked.
 function EmulatorRow({ appid }: { appid: number }) {
   const [info, setInfo] = useState<{ emulators: string[]; chosen: string; saves: string } | null>(null);
   const [said, setSaid] = useState<string | null>(null);
@@ -587,7 +666,7 @@ function EmulatorRow({ appid }: { appid: number }) {
       <DropdownItem
         label={t.emulatorLabel}
         description={said ?? (noSaves ? t.emulatorNoSaves(info.saves) : t.emulatorDesc)}
-        rgOptions={[{ data: "", label: t.emulatorDefault }, ...info.emulators.map((e) => ({ data: e, label: e }))]}
+        rgOptions={[{ data: "", label: info.saves ? t.emulatorSynced(info.saves) : t.emulatorDefault }, ...info.emulators.map((e) => ({ data: e, label: e }))]}
         selectedOption={info.chosen}
         onChange={(o) => {
           if (running(appid)) return setSaid(t.ownWhy("running"));

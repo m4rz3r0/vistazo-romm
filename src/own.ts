@@ -58,6 +58,20 @@ export const saveSync = callable<[appid: number, choice: string], SaveAnswer>("s
 export const saveState = callable<[appid: number], SaveAnswer>("save_state");
 export const biosState = callable<[appid: number], { state: string; missing?: string[] }>("bios_state");
 export const biosFetch = callable<[appid: number], { state: string; why?: string }>("bios_fetch");
+// Every console's missing BIOS files at once, and how far that has got meanwhile.
+export interface BiosAllAnswer {
+  state: string;
+  consoles?: number;
+  files?: number;
+  brought?: number;
+  failed?: string[];
+  unknown?: string[];
+  why?: string;
+}
+export const biosAll = callable<[], BiosAllAnswer>("bios_all");
+export const biosAllState = callable<[], { state: string; done: number; total: number; file: string }>("bios_all_state");
+// Said when BIOS files came in from the settings: what each game's page knew of them is stale.
+export const BIOS_EVENT = "vistazo-romm:bios";
 export const tellChanged = () => changed();
 export const running = (appid: number) => isRunning(appid);
 const tidy = callable<[], Reply>("game_tidy");

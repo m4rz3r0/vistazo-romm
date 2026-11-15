@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { Addon, AddonAction, AddonFile, AddonGame, AddonProgress, CONTRACT, VistazoApi } from "./contract";
 import { t } from "./i18n";
 import {
+  BIOS_EVENT,
   biosFetch,
   biosState,
   busyJob,
@@ -80,6 +81,8 @@ function retrySave(appid: number, attempt = 0) {
 }
 // The files the console needs: asked once per game while Steam runs, and again after bringing them.
 const biosKnown = new Map<number, AddonGame["bios"]>();
+// Brought for every console from the settings: each page asks again.
+window.addEventListener(BIOS_EVENT, () => biosKnown.clear());
 async function bios(appid: number): Promise<AddonGame["bios"]> {
   if (biosKnown.has(appid)) return biosKnown.get(appid);
   const b = await biosState(appid).catch(() => null);
