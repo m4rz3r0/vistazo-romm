@@ -158,12 +158,19 @@ async function rommArt(appid: number, romId: number) {
   if (Date.now() - (asked[romId] ?? 0) < DAY) return;
   const got = await pictures(romId, lacking.map(([, kind]) => kind)).catch(() => null);
   if (!got?.ok) return;
+  const given = lacking.filter(([, kind]) => got[kind]);
+  for (const [type, kind] of given) {
+    const p = got[kind]!;
+    await Promise.resolve(safe(() => SteamClient.Apps.SetCustomArtworkForApp(appid, p.data, p.kind, type), undefined)).catch(() => undefined);
+  }
+  // Remembered as asked only once Steam shows what RomM gave: a picture set while the entry was
+  // still being made may not stick, and is then asked again the next time instead of a day later.
+  await new Promise((r) => setTimeout(r, 1500));
+  const now = safe(() => appStore.GetAppOverviewByAppID(appid), null);
+  const missing = given.filter(([, , method]) => !safe(() => (appStore[method](now) as string[]).length, 0));
+  if (missing.length) return;
   asked[romId] = Date.now();
   safe(() => localStorage.setItem(ASKED, JSON.stringify(asked)), undefined);
-  for (const [type, kind] of lacking) {
-    const p = got[kind];
-    if (p) safe(() => SteamClient.Apps.SetCustomArtworkForApp(appid, p.data, p.kind, type), undefined);
-  }
 }
 
 // Which Steam entry each of the add-on's came from, kept on the Deck: its pictures may arrive later.
