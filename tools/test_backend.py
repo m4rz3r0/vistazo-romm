@@ -966,11 +966,29 @@ def test_cover():
     before = len(romm.calls)
     got = run(plugin.game_pictures(20, ["hero", "logo", "wide", "nonsense"]))
     b64 = __import__("base64").b64decode
-    check("pictures RomM keeps", (got["ok"], b64(got["hero"]["data"]), got["hero"]["kind"], b64(got["logo"]["data"]), got["logo"]["kind"], "wide" in got),
-          (True, jpg, "jpg", png, "png", False))
+    check("pictures RomM keeps, never its fanart as the hero", (got["ok"], "hero" in got, b64(got["logo"]["data"]), got["logo"]["kind"], "wide" in got),
+          (True, False, png, "png", False))
     check("pictures: only RomM's own folder asked", sorted(c[1].split("?")[0] for c in romm.calls[before:]),
-          ["/api/roms/20", "/assets/romm/resources/roms/1/20/fanart/fanart.jpg", "/assets/romm/resources/roms/1/20/logo/logo.png"])
+          ["/api/roms/20", "/assets/romm/resources/roms/1/20/logo/logo.png"])
     check("only the kinds asked for", sorted(k for k in run(plugin.game_pictures(20, ["logo"])) if k != "ok"), ["logo"])
+    check("the default leaves the hero out", "hero" in run(plugin.game_pictures(20)), False)
+
+    # A hero given from that fanart by an earlier version is told apart by its bytes, in every
+    # Steam account and either Steam folder; any other hero is the player's and stays.
+    grid = os.path.join(HOME, ".local", "share", "Steam", "userdata", "111", "config", "grid")
+    other = os.path.join(HOME, ".steam", "steam", "userdata", "222", "config", "grid")
+    os.makedirs(grid, exist_ok=True)
+    os.makedirs(other, exist_ok=True)
+    check("fanart hero: no hero", run(plugin.fanart_hero(777, 20)), {"ok": True, "same": False})
+    with open(os.path.join(grid, "777_hero.jpg"), "wb") as f:
+        f.write(b"\xff\xd8\xff" + b"the player's own")
+    check("fanart hero: the player's", run(plugin.fanart_hero(777, 20)), {"ok": True, "same": False})
+    with open(os.path.join(other, "777_hero.jpg"), "wb") as f:
+        f.write(jpg)
+    check("fanart hero: RomM's fanart", run(plugin.fanart_hero(777, 20)), {"ok": True, "same": True})
+    check("fanart hero: another entry", run(plugin.fanart_hero(778, 20)), {"ok": True, "same": False})
+    check("fanart hero: unknown game", run(plugin.fanart_hero(777, 999))["ok"], False)
+    check("fanart hero: no game", run(plugin.fanart_hero(777, 0))["ok"], False)
     romm.roms[20].pop("ss_metadata")
     check("no media kept", run(plugin.game_pictures(20)), {"ok": True})
     check("unknown game", run(plugin.game_pictures(999))["ok"], False)
@@ -1097,8 +1115,9 @@ def test_steamgriddb():
         check("only the kinds asked for", sorted(k for k in got if k != "ok"), ["hero"])
         check("only its pictures asked", [p.split("?")[0] for p, _ in sgdb.calls if p.startswith("/api/v2/") and "search" not in p], ["/api/v2/heroes/game/4"])
         sgdb.calls.clear()
-        check("RomM's pictures kept", run(plugin.sgdb_pictures(23, ["cover", "hero", "logo"])), {"ok": True})
+        check("RomM's pictures kept", run(plugin.sgdb_pictures(23, ["cover", "logo"])), {"ok": True})
         check("nothing asked for them", sgdb.calls, [])
+        check("the hero comes from SteamGridDB even with RomM's fanart", sorted(k for k in run(plugin.sgdb_pictures(23, ["hero"])) if k != "ok"), ["hero"])
         check("what RomM lacks still comes", sorted(k for k in run(plugin.sgdb_pictures(23, ["cover", "wide"])) if k != "ok"), ["wide"])
 
         # When unsure, nothing: two games with that name, or none with it exactly.

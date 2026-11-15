@@ -55,9 +55,11 @@ It does nothing without Vistazo installed.
 - **Save games** (DS and Wii for now). When a game played from its Vistazo entry closes, its save goes
   to RomM; a newer one on RomM is brought only when the Deck's has not changed, and only after keeping a copy of it.
   When both changed, nothing is touched until you choose on the game's page. A short notice says what happened.
-- **Pictures.** Each entry gets its cover from RomM and, when RomM keeps them, ScreenScraper's wide picture and logo
-  (in RomM's `config.yml`, add `fanart` and `logo` to `scan.media`, then rescan with "update").
-  What RomM lacks is copied from Tender's entry of the same game while Tender is installed.
+- **Pictures.** Each entry gets its cover from RomM and, when RomM keeps it, ScreenScraper's logo
+  (in RomM's `config.yml`, add `logo` to `scan.media`, then rescan with "update"). ScreenScraper's fanart is not used
+  as the background: it is often of another game of the series. A background an earlier version took from it is taken
+  off once (only when it is that very picture), so the cover shows instead.
+  The logo and wide picture RomM lacks are copied from Tender's entry of the same game while Tender is installed.
   With your own [SteamGridDB](https://www.steamgriddb.com) key (off until you paste one in **Pictures from
   SteamGridDB**; it is on steamgriddb.com under Preferences › API), what is still missing comes from there: cover, wide
   picture, hero and logo, and the icon of a new entry. A picture RomM or you already gave is never replaced, and a game

@@ -101,6 +101,10 @@ export function loadOwned(again = false): Promise<void> {
       finishPending();
       // Play time that could not go before (RomM asleep) goes now.
       playState().catch(() => undefined);
+      // Heroes once taken from ScreenScraper's fanart come off on every entry, not only the ones opened.
+      (async () => {
+        for (const [appid, romId] of [...owned]) await dropFanart(appid, romId).catch(() => undefined);
+      })();
     })
     .catch((e) => {
       loaded = null;
@@ -126,8 +130,8 @@ async function untilKnown(appid: number) {
 // The pictures Steam shows for an entry, by Steam's own numbers: cover, wide picture behind the
 // page, and logo.
 const COVER = 0;
+// The hero is not copied: Tender's comes from ScreenScraper's fanart, often of another game.
 const ART: [number, string][] = [
-  [1, "GetCustomHeroImageURLs"],
   [2, "GetCustomLogoImageURLs"],
   [3, "GetCustomLandcapeImageURLs"], // sic: Steam's own spelling
 ];
@@ -153,14 +157,27 @@ async function picture(urls: string[]): Promise<[string, string] | null> {
   return null;
 }
 
-// The pictures RomM keeps for a game (its copies of ScreenScraper's wide picture and logo), for
-// the ones the entry lacks. RomM is asked at most once a day per game: a game without them is not
+// The pictures RomM keeps for a game (its copy of ScreenScraper's logo), for the ones the entry
+// lacks. Not its fanart for the hero: it is often of another game of the series. RomM is asked at most once a day per game: a game without them is not
 // asked about at every page. (RomM 5.4 keeps no wide capsule of its own: that one comes from
 // Tender's entry while there is one.)
-const FROM_ROMM: [number, "hero" | "logo" | "wide", string][] = [
-  [1, "hero", "GetCustomHeroImageURLs"],
-  [2, "logo", "GetCustomLogoImageURLs"],
-];
+const FROM_ROMM: [number, "logo" | "wide", string][] = [[2, "logo", "GetCustomLogoImageURLs"]];
+
+// A hero an earlier version gave from ScreenScraper's fanart (or copied from Tender's) is taken off
+// once per game, so the cover shows instead or SteamGridDB gives one. Only when it is that very
+// picture: a hero the player chose stays.
+const fanartHero = callable<[appid: number, romId: number], Reply & { same?: boolean }>("fanart_hero");
+const FANART_CHECKED = "vistazo-romm:fanart-checked";
+async function dropFanart(appid: number, romId: number) {
+  if (!appid || !romId) return;
+  const checked: Record<string, boolean> = safe(() => JSON.parse(localStorage.getItem(FANART_CHECKED) ?? "{}") ?? {}, {});
+  if (checked[appid]) return;
+  const got = await fanartHero(appid, romId).catch(() => null);
+  if (!got?.ok) return;
+  if (got.same) safe(() => SteamClient.Apps.ClearCustomArtworkForApp(appid, 1), undefined);
+  checked[appid] = true;
+  safe(() => localStorage.setItem(FANART_CHECKED, JSON.stringify(checked)), undefined);
+}
 const ASKED = "vistazo-romm:pictures-asked";
 const DAY = 24 * 60 * 60 * 1000;
 async function rommArt(appid: number, romId: number) {
@@ -213,7 +230,9 @@ async function borrowArt(appid: number, from: number) {
 // RomM's own first; what it lacks, from Tender's entry while there is one.
 export const refreshArt = (appid: number) => {
   const from = sources()[appid];
-  rommArt(appid, ownedRom(appid))
+  dropFanart(appid, ownedRom(appid))
+    .catch(() => undefined)
+    .then(() => rommArt(appid, ownedRom(appid)))
     .catch(() => undefined)
     .then(() => (from ? borrowArt(appid, from) : undefined))
     .catch(() => undefined)
@@ -476,7 +495,9 @@ export async function syncLibrary(step: (done: number, total: number) => void): 
     // Pictures from RomM first; then from Tender's entries of the same games, for what is still missing.
     for (const g of games) {
       const appid = ownedAny(versionsOf(g));
-      if (appid) await rommArt(appid, ownedRom(appid)).catch(() => undefined);
+      if (!appid) continue;
+      await dropFanart(appid, ownedRom(appid)).catch(() => undefined);
+      await rommArt(appid, ownedRom(appid)).catch(() => undefined);
     }
     const theirs = await tenderEntries();
     for (const g of games) {

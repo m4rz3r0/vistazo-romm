@@ -562,7 +562,11 @@ COVER_KINDS = ((b"\x89PNG\r\n\x1a\n", "png"), (b"\xff\xd8\xff", "jpg"))
 # The other pictures of a Steam entry, from what RomM keeps of ScreenScraper's media (when RomM
 # is set to keep them): the wide picture behind the page, the logo over it and the wide capsule.
 # Only RomM's own copies are used, never ScreenScraper's addresses (they carry RomM's account).
-PICTURES = {"hero": ("fanart_path",), "logo": ("logo_path",), "wide": ("steamgrid_path",)}
+# ScreenScraper's fanart is not taken for the hero: it is often of another game of the series. It is
+# still read to tell the heroes once given from it (fanart_hero) and take them off.
+PICTURES = {"logo": ("logo_path",), "wide": ("steamgrid_path",)}
+FANART = ("fanart_path",)
+STEAM_ROOTS = (os.path.join(".local", "share", "Steam"), os.path.join(".steam", "steam"))
 PICTURE_MAX = 8 * 1024 * 1024
 
 
@@ -574,11 +578,34 @@ def _cover(server, key, rom):
 def _picture(server, key, rom, kind):
     """One of the entry's other pictures as RomM keeps it: (bytes, "png" or "jpg"), or None."""
     ss = rom.get("ss_metadata") if isinstance(rom.get("ss_metadata"), dict) else {}
-    for field in PICTURES[kind]:
+    for field in FANART if kind == "fanart" else PICTURES[kind]:
         path = _text(ss.get(field)).split("?")[0].lstrip("/")
         if path:
             return _resource(server, key, COVERS + path, PICTURE_MAX)
     return None
+
+
+def _steam_heroes(appid):
+    """The bytes of every hero Steam keeps for this entry, one per Steam account on the device."""
+    seen, out = set(), []
+    for root in STEAM_ROOTS:
+        users = os.path.join(_home(), root, "userdata")
+        try:
+            accounts = os.listdir(users)
+        except OSError:
+            continue
+        for account in accounts:
+            for ext in ("jpg", "png"):
+                path = os.path.realpath(os.path.join(users, account, "config", "grid", "%d_hero.%s" % (appid, ext)))
+                if path in seen or not os.path.isfile(path):
+                    continue
+                seen.add(path)
+                try:
+                    with open(path, "rb") as f:
+                        out.append(f.read(PICTURE_MAX + 1))
+                except OSError:
+                    pass
+    return out
 
 
 def _resource(server, key, path, most):
@@ -3112,7 +3139,7 @@ class Plugin:
             return {"ok": False, "why": "cover"}
         return {"ok": True, "data": base64.b64encode(cover[0]).decode("ascii"), "kind": cover[1]}
 
-    async def game_pictures(self, rom_id, kinds=("hero", "logo", "wide")):
+    async def game_pictures(self, rom_id, kinds=("logo", "wide")):
         """The entry's other pictures that RomM keeps: {"ok": True, kind: {"data", "kind"}}
         for each of `kinds` RomM has; the ones it lacks are left out."""
         rom_id = _number(rom_id)
@@ -3130,6 +3157,24 @@ class Plugin:
             if got:
                 out[kind] = {"data": base64.b64encode(got[0]).decode("ascii"), "kind": got[1]}
         return out
+
+    async def fanart_hero(self, appid, rom_id):
+        """Whether the entry's hero is ScreenScraper's fanart RomM keeps for the game (given by an
+        earlier version, or copied from Tender's entry): {"ok": True, "same": bool}. Then the
+        frontend takes it off. Only the bytes are compared: a hero the player chose stays."""
+        appid, rom_id = _number(appid), _number(rom_id)
+        server, key = _games_key()
+        if not server or rom_id <= 0 or appid <= 0:
+            return {"ok": False, "why": key if not server else "game"}
+        loop = asyncio.get_running_loop()
+        heroes = await loop.run_in_executor(None, _steam_heroes, appid)
+        if not heroes:
+            return {"ok": True, "same": False}
+        rom, why = await loop.run_in_executor(None, _rom, server, key, rom_id)
+        if not rom:
+            return {"ok": False, "why": why}
+        fanart = await loop.run_in_executor(None, _picture, server, key, rom, "fanart")
+        return {"ok": True, "same": bool(fanart) and fanart[0] in heroes}
 
     async def sgdb_status(self):
         """Whether pictures may come from SteamGridDB (a key is kept), and "refused" when it
