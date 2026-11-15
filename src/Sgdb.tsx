@@ -4,8 +4,9 @@ import { useCallback, useEffect, useState } from "react";
 import { t } from "./i18n";
 
 // SteamGridDB, for the pictures RomM lacks: off until the player pastes their own key. One row
-// with its state and the one thing to do about it; the key is never shown or handed back.
-export type SgdbStatus = { on: boolean; refused?: boolean };
+// with its state and the one thing to do about it; the key is never shown or handed back. It is
+// kept in the RomM account too, so it is typed once and the other devices pick it up.
+export type SgdbStatus = { on: boolean; refused?: boolean; shared?: boolean };
 export const sgdbStatus = callable<[], SgdbStatus>("sgdb_status");
 const setKey = callable<[key: string], { result: string }>("sgdb_set_key");
 const forget = callable<[], { ok: boolean }>("sgdb_forget");
@@ -19,7 +20,7 @@ export function SgdbRow() {
   }, []);
   useEffect(read, [read]);
   if (!status) return null;
-  const description = !status.on ? t.sgdbOff : status.refused ? t.sgdbRefused : t.sgdbOn;
+  const description = !status.on ? t.sgdbOff : status.refused ? t.sgdbRefused : status.shared ? t.sgdbShared : t.sgdbOn;
   return (
     <PanelSectionRow>
       <ButtonItem

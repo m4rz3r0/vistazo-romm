@@ -68,6 +68,9 @@ It does nothing without Vistazo installed.
   your key, a background an earlier version took from ScreenScraper's fanart is taken off once so SteamGridDB's can
   come first, only when it is that very picture), and a game
   whose name matches none or several games on SteamGridDB gets nothing rather than another game's pictures.
+  You type the key once: it is also kept in your RomM account (its UI settings, which only you and RomM's admins can
+  read), and every other device linked to that account picks it up within minutes. **Remove** takes it off on all of
+  them. RomM's own SteamGridDB key never leaves the server and only finds covers, so it cannot be used for this.
 - **BIOS files.** The game's page says whether the BIOS files RomM has for its console are on the Deck, and brings the
   missing ones, checked against RomM's sums. *Bring all BIOS files*, in the settings, does the same at once for every
   console RomM has games of, with how far it has got. Each file goes where RetroDECK's own list of BIOS files puts it
@@ -100,8 +103,9 @@ it brought itself. A game starts through a small launcher that Steam hands nothi
 name goes through Steam's launch options. No telemetry.
 
 Only when you give it a SteamGridDB key does the add-on talk to anyone else: it sends SteamGridDB the name of a game
-whose pictures are missing, over HTTPS, with that key. The key is kept on the Deck for your user only, is never logged
-and goes nowhere but SteamGridDB; the pictures themselves are fetched from SteamGridDB's image servers without it.
+whose pictures are missing, over HTTPS, with that key. The key is kept on the device for your user only, is never logged
+and goes nowhere but SteamGridDB and your own RomM account, which hands it to your other devices; the pictures
+themselves are fetched from SteamGridDB's image servers without it.
 
 ## Building
 

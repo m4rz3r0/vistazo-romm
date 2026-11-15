@@ -229,8 +229,9 @@ const es = {
   ownNoFile: "La entrada está creada, pero falta el juego.",
   // SteamGridDB: pictures RomM lacks, with the player's own key.
   sgdbLabel: "Imágenes de SteamGridDB",
-  sgdbOff: "Completa las imágenes que falten en RomM. Necesita tu propia clave de SteamGridDB.",
+  sgdbOff: "Completa las imágenes que falten en RomM. Necesita tu clave de SteamGridDB; se pone una vez y llega a tus otros equipos a través de RomM.",
   sgdbOn: "Activo: completa las imágenes que falten. Solo se envía el nombre del juego.",
+  sgdbShared: "Activo y guardado en tu cuenta de RomM: tus otros equipos lo cogen solos. Quitar lo quita en todos.",
   sgdbRefused: "SteamGridDB ya no acepta la clave: pon otra.",
   sgdbAdd: "Poner clave",
   sgdbAgain: "Poner otra clave",
@@ -479,8 +480,9 @@ const en: typeof es = {
   ownNoFile: "The entry is there, but the game is missing.",
   // SteamGridDB: pictures RomM lacks, with the player's own key.
   sgdbLabel: "Pictures from SteamGridDB",
-  sgdbOff: "Fills in the pictures RomM lacks. It needs your own SteamGridDB key.",
+  sgdbOff: "Fills in the pictures RomM lacks. It needs your SteamGridDB key; add it once and it reaches your other devices through RomM.",
   sgdbOn: "On: it fills in the pictures that are missing. Only the game's name is sent.",
+  sgdbShared: "On and kept in your RomM account: your other devices pick it up. Removing it removes it on all of them.",
   sgdbRefused: "SteamGridDB no longer takes the key: add another one.",
   sgdbAdd: "Add key",
   sgdbAgain: "Add another key",

@@ -78,6 +78,8 @@ class RomM:
         self.scopes = {}  # raw token -> its scopes
         self.devices = {}  # device id -> what it was registered with
         self.devices_down = 0  # a status to answer the devices endpoints with instead
+        self.ui_settings = None  # the account's UI settings, as RomM keeps them
+        self.ui_puts = []  # each ui_settings written, as sent
         self.synced = set()  # (device id, save id): the versions RomM knows each device has
         self.downloaded = []  # (save id, body) of each download a device confirmed
         self.play_devices = []  # the device id each batch of play sessions came with
@@ -191,6 +193,16 @@ class Handler(BaseHTTPRequestHandler):
                 romm.saves[-1]["origin_device_id"] = device
                 romm.synced.add((device, saved["id"]))
             return self.reply(201, saved)
+        if method == "PUT" and self.path == "/api/users/1":
+            from urllib.parse import parse_qs
+            romm.calls.append((method, self.path, bearer))
+            if bearer not in romm.tokens:
+                return self.reply(401)
+            assert self.headers["Content-Type"] == "application/x-www-form-urlencoded"
+            form = parse_qs(raw.decode())
+            romm.ui_puts.append(form["ui_settings"][0])
+            romm.ui_settings = json.loads(form["ui_settings"][0])
+            return self.reply(200, {"id": 1, "ui_settings": romm.ui_settings})
         body = json.loads(raw) if raw else None
         romm.calls.append((method, self.path, bearer))
         parts = self.path.split("?")[0].strip("/").split("/")
@@ -235,7 +247,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(200, {"id": int(parts[2])})
             return self.reply(405)
         if self.path == "/api/users/me":
-            return self.reply(200, {"id": 1, "ra_progression": {"results": [
+            return self.reply(200, {"id": 1, "ui_settings": romm.ui_settings, "ra_progression": {"results": [
                 {"rom_ra_id": 77, "num_awarded": 2, "num_awarded_hardcore": 1, "max_possible": 130,
                  "earned_achievements": [{"id": "100", "date_hardcore": "x"}, {"id": "101"}]}]}})
         if parts[:4] == ["assets", "romm", "resources", "roms"]:
@@ -1060,6 +1072,73 @@ threading.Thread(target=sgdb_server.serve_forever, daemon=True).start()
 SGDB_URL = "http://127.0.0.1:%d" % sgdb_server.server_port
 
 
+def test_sgdb_shared():
+    # The key travels through the RomM account's UI settings: typed once, picked up elsewhere.
+    other = "Bb" * 16
+    try:
+        romm.ui_settings = {"theme": "dark"}
+        romm.ui_puts.clear()
+        main._sgdb_sync["at"] = 0.0
+        check("typed: handed to RomM", run(plugin.sgdb_set_key(SGDB_KEY)), {"result": "ok", "shared": True})
+        check("the rest of the settings kept", romm.ui_settings, {"theme": "dark", "vistazo_sgdb_key": SGDB_KEY})
+        check("shared status", run(plugin.sgdb_status()), {"on": True, "shared": True})
+
+        # Another device: no key of its own, it takes the account's on its next look.
+        os.remove(main.SGDB_FILE)
+        main._sgdb_sync["at"] = 0.0
+        check("picked up from RomM", run(plugin.sgdb_status()), {"on": True, "shared": True})
+        check("kept here for this user only", (main._sgdb_key(), oct(os.stat(main.SGDB_FILE).st_mode & 0o777)), (SGDB_KEY, "0o600"))
+
+        # Not asked again until a while later.
+        before = len(romm.calls)
+        _ = run(plugin.sgdb_status())
+        check("no look at the account each time", len(romm.calls) - before, 0)
+
+        # A new key in the account replaces this one.
+        romm.ui_settings["vistazo_sgdb_key"] = other
+        main._sgdb_sync["at"] = 0.0
+        _ = run(plugin.sgdb_status())
+        check("new account key taken", main._sgdb_key(), other)
+
+        # RomM's web page rewrote its settings without it: this device puts it back.
+        romm.ui_settings = {"theme": "light"}
+        main._sgdb_sync["at"] = 0.0
+        _ = run(plugin.sgdb_status())
+        check("put back", romm.ui_settings, {"theme": "light", "vistazo_sgdb_key": other})
+
+        # Not shaped like a key: left alone and replaced by this device's.
+        romm.ui_settings["vistazo_sgdb_key"] = "../../etc"
+        main._sgdb_sync["at"] = 0.0
+        _ = run(plugin.sgdb_status())
+        check("odd value not taken", (main._sgdb_key(), romm.ui_settings["vistazo_sgdb_key"]), (other, other))
+
+        # Taken away here: "" in the account, and other devices forget it on their next look.
+        check("forget", run(plugin.sgdb_forget()), {"ok": True})
+        check("taken away in RomM", romm.ui_settings, {"theme": "light", "vistazo_sgdb_key": ""})
+        main._write_private(main.SGDB_FILE, {"key": other})
+        main._sgdb_sync["at"] = 0.0
+        check("forgotten on the other device", (run(plugin.sgdb_status()), os.path.exists(main.SGDB_FILE)), ({"on": False}, False))
+
+        # RomM unreachable or refusing: kept here all the same.
+        romm.ui_settings = None
+        tokens = dict(romm.tokens)
+        romm.tokens.clear()
+        check("RomM refuses: kept here only", run(plugin.sgdb_set_key(SGDB_KEY)), {"result": "ok", "shared": False})
+        check("status: not shared", run(plugin.sgdb_status()), {"on": True})
+        romm.tokens.update(tokens)
+        main._sgdb_sync["at"] = 0.0
+        _ = run(plugin.sgdb_status())
+        check("handed over once RomM takes it", romm.ui_settings, {"vistazo_sgdb_key": SGDB_KEY})
+        check("the key only ever in the settings form", all("vistazo_sgdb_key" in put for put in romm.ui_puts), True)
+    finally:
+        romm.ui_settings = None
+        try:
+            os.remove(main.SGDB_FILE)
+        except OSError:
+            pass
+        main._sgdb_sync.update(at=0.0, shared=False)
+
+
 def test_steamgriddb():
     import base64
     # Pointed at the pretend one, as the pretend RomM is: the add-on never reaches the real site here.
@@ -1097,9 +1176,9 @@ def test_steamgriddb():
         for bad in ("", "short", "has spaces in it 0123456789abcdef", "x" * 300, None):
             check("not a key: %r" % (bad,), run(plugin.sgdb_set_key(bad)), {"result": "invalid"})
         check("still off", run(plugin.sgdb_status()), {"on": False})
-        check("key kept", run(plugin.sgdb_set_key("  " + SGDB_KEY + "\n")), {"result": "ok"})
+        check("key kept", run(plugin.sgdb_set_key("  " + SGDB_KEY + "\n")), {"result": "ok", "shared": True})
         check("key file private", mode(main.SGDB_FILE), 0o600)
-        check("on", run(plugin.sgdb_status()), {"on": True})
+        check("on", run(plugin.sgdb_status()), {"on": True, "shared": True})
 
         # An exact name among others: that game, with its pictures; only the name went out.
         got = run(plugin.sgdb_pictures(21, every))
@@ -1176,9 +1255,9 @@ def test_steamgriddb():
         sgdb.refuse = True
         main._sgdb_ids.clear()
         check("refused", run(plugin.sgdb_pictures(21, every)), {"ok": False, "why": "refused"})
-        check("refused status", run(plugin.sgdb_status()), {"on": True, "refused": True})
+        check("refused status", run(plugin.sgdb_status()), {"on": True, "refused": True, "shared": True})
         sgdb.refuse = False
-        check("a new key clears it", (run(plugin.sgdb_set_key(SGDB_KEY)), run(plugin.sgdb_status())), ({"result": "ok"}, {"on": True}))
+        check("a new key clears it", (run(plugin.sgdb_set_key(SGDB_KEY)), run(plugin.sgdb_status())), ({"result": "ok", "shared": True}, {"on": True, "shared": True}))
 
         # Forgotten: off again, and nothing asked.
         check("forget", run(plugin.sgdb_forget()), {"ok": True})
@@ -2880,6 +2959,7 @@ try:
     test_collections()
     test_cover()
     test_steamgriddb()
+    test_sgdb_shared()
     test_launcher()
     test_download()
     test_archive()

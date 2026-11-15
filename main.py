@@ -661,6 +661,83 @@ def _sgdb_key():
     return key if isinstance(key, str) and SGDB_KEY_SHAPE.fullmatch(key) else None
 
 
+# The key also lives in the player's RomM account, in its UI settings (only they and RomM's admins
+# can read them), so every device linked to that account picks it up without typing it again.
+# RomM's own key never leaves the server: it only finds covers, so Vistazo keeps one of its own.
+# "" there means it was taken away on some device: then every device forgets it too.
+SGDB_SHARED = "vistazo_sgdb_key"
+SGDB_SYNC_EVERY = 600  # seconds between looks at the account
+_sgdb_sync = {"at": 0.0, "shared": False, "lock": None}
+
+
+def _romm_me(server, key):
+    status, me = _request(server, "GET", "/api/users/me", key["token"])
+    return me if status == 200 and isinstance(me, dict) and _number(me.get("id")) > 0 else None
+
+
+def _ui_settings(me):
+    ui = me.get("ui_settings")
+    return dict(ui) if isinstance(ui, dict) else {}
+
+
+def _sgdb_put(server, key, me, value):
+    """Writes the key ("" once taken away) into the account's UI settings, keeping the rest of them."""
+    ui = _ui_settings(me)
+    if ui.get(SGDB_SHARED) == value:
+        return True
+    ui[SGDB_SHARED] = value
+    form = urllib.parse.urlencode({"ui_settings": json.dumps(ui)}).encode("utf-8")
+    status, _ = _request(server, "PUT", "/api/users/%d" % _number(me["id"]), key["token"],
+                         raw=(form, "application/x-www-form-urlencoded"))
+    return status == 200
+
+
+def _sgdb_linked():
+    """(server, RomM key) when this device is linked to the server it uses, else (None, None)."""
+    key, server = _read_key(), _server()
+    return (server, key) if key and server and key["url"] == server["url"] else (None, None)
+
+
+def _sgdb_share(value):
+    """Hands the key to the account (or "" to take it away): True when RomM took it."""
+    server, key = _sgdb_linked()
+    me = _romm_me(server, key) if server else None
+    done = bool(me) and _sgdb_put(server, key, me, value)
+    _sgdb_sync["shared"] = done and bool(value)
+    _sgdb_sync["at"] = time.monotonic()
+    return done
+
+
+def _sgdb_pull():
+    """Brings the account's key here; puts this device's back when the account lost it (RomM's
+    web page may rewrite its UI settings); forgets it here when it was taken away elsewhere."""
+    _sgdb_sync["at"] = time.monotonic()
+    server, key = _sgdb_linked()
+    me = _romm_me(server, key) if server else None
+    if not me:
+        return
+    shared, local = _ui_settings(me).get(SGDB_SHARED), _sgdb_key()
+    if isinstance(shared, str) and SGDB_KEY_SHAPE.fullmatch(shared):
+        if shared != local and _write_private(SGDB_FILE, {"key": shared}):
+            _sgdb_refused[0] = False
+            _sgdb_ids.clear()
+            decky.logger.info("SteamGridDB key taken from RomM")
+        _sgdb_sync["shared"] = True
+    elif shared == "" and local:
+        try:
+            os.remove(SGDB_FILE)
+        except OSError:
+            pass
+        _sgdb_refused[0] = False
+        _sgdb_ids.clear()
+        _sgdb_sync["shared"] = False
+        decky.logger.info("SteamGridDB key taken away on another device")
+    elif local:
+        _sgdb_sync["shared"] = _sgdb_put(server, key, me, local)
+    else:
+        _sgdb_sync["shared"] = False
+
+
 def _sgdb_name(name):
     """A name as compared: no accents, case or punctuation."""
     import unicodedata
@@ -3266,14 +3343,24 @@ class Plugin:
         return {"ok": True, "data": base64.b64encode(got[0]).decode("ascii"), "kind": got[1]}
 
     async def sgdb_status(self):
-        """Whether pictures may come from SteamGridDB (a key is kept), and "refused" when it
-        turned the key down. The key itself is never handed back."""
+        """Whether pictures may come from SteamGridDB (a key is kept), "refused" when it turned the
+        key down and "shared" when the RomM account keeps it too. Now and then it first looks at
+        the account (see _sgdb_pull). The key itself is never handed back."""
+        if _sgdb_sync["lock"] is None:
+            _sgdb_sync["lock"] = asyncio.Lock()
+        async with _sgdb_sync["lock"]:
+            if not _sgdb_sync["at"] or time.monotonic() - _sgdb_sync["at"] > SGDB_SYNC_EVERY:
+                await asyncio.get_running_loop().run_in_executor(None, _sgdb_pull)
         on = _sgdb_key() is not None
-        return {"on": True, "refused": True} if on and _sgdb_refused[0] else {"on": on}
+        out = {"on": True, "refused": True} if on and _sgdb_refused[0] else {"on": on}
+        if on and _sgdb_sync["shared"]:
+            out["shared"] = True
+        return out
 
     async def sgdb_set_key(self, key):
-        """Keeps the player's own SteamGridDB key: {"result"}: "ok", "invalid" (not shaped like
-        one) or "error" (not saved)."""
+        """Keeps the player's own SteamGridDB key, here and in the RomM account for the other
+        devices: {"result", "shared"}; the result is "ok", "invalid" (not shaped like one) or
+        "error" (not saved), and "shared" whether RomM took it too."""
         key = key.strip() if isinstance(key, str) else ""
         if not SGDB_KEY_SHAPE.fullmatch(key):
             return {"result": "invalid"}
@@ -3281,17 +3368,20 @@ class Plugin:
             return {"result": "error"}
         _sgdb_refused[0] = False
         _sgdb_ids.clear()
-        decky.logger.info("SteamGridDB key kept")
-        return {"result": "ok"}
+        shared = await asyncio.get_running_loop().run_in_executor(None, _sgdb_share, key)
+        decky.logger.info("SteamGridDB key kept%s", " and handed to RomM" if shared else "")
+        return {"result": "ok", "shared": shared}
 
     async def sgdb_forget(self):
-        """Forgets the SteamGridDB key: nothing more is asked of it."""
+        """Forgets the SteamGridDB key here and in the RomM account, so the other devices forget
+        it too: nothing more is asked of it."""
         try:
             os.remove(SGDB_FILE)
         except OSError:
             pass
         _sgdb_refused[0] = False
         _sgdb_ids.clear()
+        await asyncio.get_running_loop().run_in_executor(None, _sgdb_share, "")
         decky.logger.info("SteamGridDB key forgotten")
         return {"ok": True}
 
