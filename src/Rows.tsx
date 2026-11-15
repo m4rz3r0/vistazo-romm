@@ -15,11 +15,12 @@ declare const appStore: any;
 // The add-on's rows, shown inside Vistazo's settings and in its own Quick Access panel, by topic:
 // the connection first, then the game whose page is open, the library, saves and BIOS, controls,
 // pictures, and last what is left to tidy up. A group with nothing to show today (no game page open,
-// nothing to tidy) hides whole, title included.
+// nothing to tidy) hides whole, title included. Steam's buttons carry no tabindex, so anything
+// that can take focus counts: a button, an input or one of Steam's Focusable elements.
 export function Settings() {
   return (
     <>
-      <style>{`.vr-group:not(:has([tabindex])) { display: none; }`}</style>
+      <style>{`.vr-group:not(:has(button, input, select, .Focusable, [tabindex])) { display: none; }`}</style>
       <Group title={t.groupConnection}>
         <ServerRow />
         <RommRow games />
