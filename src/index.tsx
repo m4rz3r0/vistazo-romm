@@ -1,5 +1,5 @@
 import { definePlugin } from "@decky/api";
-import { PanelSection, PanelSectionRow } from "@decky/ui";
+import { PanelSection, PanelSectionRow, showModal } from "@decky/ui";
 import { useEffect, useState } from "react";
 import { Addon, AddonAction, AddonFile, AddonGame, AddonProgress, CONTRACT, VistazoApi } from "./contract";
 import { t } from "./i18n";
@@ -26,6 +26,7 @@ import {
 import { isLinked, rommGame, rommProgress, rommStatus } from "./romm";
 import { safe } from "./safe";
 import { Settings } from "./Rows";
+import { HeroModal } from "./Hero";
 import { tuckAway } from "./tuck";
 import { ownGames, syncSaves } from "./settings";
 import { tellBios, tellSave } from "./notify";
@@ -196,7 +197,8 @@ async function count(appid: number, refresh: boolean): Promise<{ achieved: numbe
   return { achieved: Number(p.earned) || 0, total: Number(p.total) || (g.achievements ?? []).length };
 }
 
-// On one of its own games' pages: taking the file off the Deck, when the add-on brought it.
+// On one of its own games' pages: taking the file off the device when the add-on brought it, and
+// changing the background.
 async function actions(appid: number): Promise<AddonAction[]> {
   if (!ownGames() || !ownedRom(appid)) return [];
   const out: AddonAction[] = [];
@@ -226,6 +228,9 @@ async function actions(appid: number): Promise<AddonAction[]> {
     });
   const s = await gameState(appid).catch(() => null);
   if (s?.installed && s.removable) out.push({ id: "uninstall", label: t.uninstall, run: async () => void (await uninstallOwn(appid)) });
+  // The background: picked from thumbnails of every one there is for the game.
+  const romId = ownedRom(appid);
+  out.push({ id: "hero", label: t.heroChange, run: () => void showModal(<HeroModal appid={appid} romId={romId} />) });
   return out;
 }
 

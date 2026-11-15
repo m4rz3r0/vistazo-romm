@@ -101,9 +101,9 @@ export function loadOwned(again = false): Promise<void> {
       finishPending();
       // Play time that could not go before (RomM asleep) goes now.
       playState().catch(() => undefined);
-      // Heroes once taken from ScreenScraper's fanart come off on every entry, not only the ones opened.
+      // Every entry gets its background, not only the ones whose page is opened.
       (async () => {
-        for (const [appid, romId] of [...owned]) await dropFanart(appid, romId).catch(() => undefined);
+        for (const [appid, romId] of [...owned]) await fillHero(appid, romId).catch(() => undefined);
       })();
     })
     .catch((e) => {
@@ -157,36 +157,70 @@ async function picture(urls: string[]): Promise<[string, string] | null> {
   return null;
 }
 
-// The pictures RomM keeps for a game (its copy of ScreenScraper's logo), for the ones the entry
-// lacks. Not its fanart for the hero: it is often of another game of the series. RomM is asked at most once a day per game: a game without them is not
-// asked about at every page. (RomM 5.4 keeps no wide capsule of its own: that one comes from
-// Tender's entry while there is one.)
-const FROM_ROMM: [number, "logo" | "wide", string][] = [[2, "logo", "GetCustomLogoImageURLs"]];
+// The pictures RomM keeps for a game (its copies of ScreenScraper's logo and fanart), for the ones
+// the entry lacks. RomM is asked at most once a day per game: a game without them is not asked
+// about at every page. (RomM 5.4 keeps no wide capsule of its own: that one comes from Tender's
+// entry while there is one.) The fanart is asked for apart (`hero`), after SteamGridDB: it is often
+// of another game of the series.
+const FROM_ROMM: [number, "hero" | "logo" | "wide", string][] = [[2, "logo", "GetCustomLogoImageURLs"]];
+const HERO_FROM_ROMM: [number, "hero", string][] = [[1, "hero", "GetCustomHeroImageURLs"]];
 
-// A hero an earlier version gave from ScreenScraper's fanart (or copied from Tender's) is taken off
-// once per game, so the cover shows instead or SteamGridDB gives one. Only when it is that very
-// picture: a hero the player chose stays.
+// The background the player picked on the game's settings (or "only the cover"): nothing else
+// replaces it, gives one or takes it off.
+const HERO_PICKED = "vistazo-romm:hero-picked";
+const heroPicked = (appid: number) => !!safe(() => JSON.parse(localStorage.getItem(HERO_PICKED) ?? "{}")?.[appid], false);
+function markPicked(appid: number) {
+  const all: Record<string, boolean> = safe(() => JSON.parse(localStorage.getItem(HERO_PICKED) ?? "{}") ?? {}, {});
+  all[appid] = true;
+  safe(() => localStorage.setItem(HERO_PICKED, JSON.stringify(all)), undefined);
+}
+
+// With a SteamGridDB key, a hero an earlier version gave from ScreenScraper's fanart (or copied
+// from Tender's) is taken off once per game, so SteamGridDB's comes first; the fanart comes back
+// if SteamGridDB has none. Only when it is that very picture: a hero the player chose stays.
 const fanartHero = callable<[appid: number, romId: number], Reply & { same?: boolean }>("fanart_hero");
 const FANART_CHECKED = "vistazo-romm:fanart-checked";
 async function dropFanart(appid: number, romId: number) {
-  if (!appid || !romId) return;
+  if (!appid || !romId || heroPicked(appid)) return;
   const checked: Record<string, boolean> = safe(() => JSON.parse(localStorage.getItem(FANART_CHECKED) ?? "{}") ?? {}, {});
-  if (checked[appid]) return;
+  if (checked[appid] || !(await sgdbOn().catch(() => null))?.on) return;
   const got = await fanartHero(appid, romId).catch(() => null);
   if (!got?.ok) return;
-  if (got.same) safe(() => SteamClient.Apps.ClearCustomArtworkForApp(appid, 1), undefined);
+  if (got.same) {
+    safe(() => SteamClient.Apps.ClearCustomArtworkForApp(appid, 1), undefined);
+    // SteamGridDB is asked now, not a day after it was last asked about the game.
+    const asked: Record<string, number> = safe(() => JSON.parse(localStorage.getItem(SGDB_ASKED) ?? "{}") ?? {}, {});
+    delete asked[romId];
+    safe(() => localStorage.setItem(SGDB_ASKED, JSON.stringify(asked)), undefined);
+  }
   checked[appid] = true;
   safe(() => localStorage.setItem(FANART_CHECKED, JSON.stringify(checked)), undefined);
 }
+
+// The background, in order: SteamGridDB's (with the player's key), RomM's copy of ScreenScraper's
+// fanart when it has none, and Vistazo shows the cover when neither has one.
+async function fillHero(appid: number, romId: number) {
+  if (!appid || !romId || heroPicked(appid)) return;
+  await dropFanart(appid, romId).catch(() => undefined);
+  await sgdbArt(appid, romId).catch(() => undefined);
+  await rommArt(appid, romId, true);
+}
+
 const ASKED = "vistazo-romm:pictures-asked";
 const DAY = 24 * 60 * 60 * 1000;
-async function rommArt(appid: number, romId: number) {
+async function rommArt(appid: number, romId: number, hero = false) {
+  if (hero) {
+    if (heroPicked(appid)) return;
+    // What SteamGridDB just gave may take Steam a moment to show.
+    await wait(1500);
+  }
   const mine = safe(() => appStore.GetAppOverviewByAppID(appid), null);
   if (!mine || !romId) return;
-  const lacking = FROM_ROMM.filter(([, , method]) => !safe(() => (appStore[method](mine) as string[]).length, 0));
+  const lacking = (hero ? HERO_FROM_ROMM : FROM_ROMM).filter(([, , method]) => !safe(() => (appStore[method](mine) as string[]).length, 0));
   if (!lacking.length) return;
   const asked: Record<string, number> = safe(() => JSON.parse(localStorage.getItem(ASKED) ?? "{}") ?? {}, {});
-  if (Date.now() - (asked[romId] ?? 0) < DAY) return;
+  const askedKey = hero ? `${romId}:hero` : String(romId);
+  if (Date.now() - (asked[askedKey] ?? 0) < DAY) return;
   const got = await pictures(romId, lacking.map(([, kind]) => kind)).catch(() => null);
   if (!got?.ok) return;
   const given = lacking.filter(([, kind]) => got[kind]);
@@ -200,8 +234,9 @@ async function rommArt(appid: number, romId: number) {
   const now = safe(() => appStore.GetAppOverviewByAppID(appid), null);
   const missing = given.filter(([, , method]) => !safe(() => (appStore[method](now) as string[]).length, 0));
   if (missing.length) return;
-  asked[romId] = Date.now();
+  asked[askedKey] = Date.now();
   safe(() => localStorage.setItem(ASKED, JSON.stringify(asked)), undefined);
+  if (hero) changed();
 }
 
 // Which Steam entry each of the add-on's came from, kept on the Deck: its pictures may arrive later.
@@ -227,18 +262,34 @@ async function borrowArt(appid: number, from: number) {
   }
 }
 // Asked again when the entry's page shows: the other entry may have got its pictures since.
-// RomM's own first; what it lacks, from Tender's entry while there is one.
+// RomM's own first; what it lacks, from Tender's entry while there is one; then the background.
 export const refreshArt = (appid: number) => {
   const from = sources()[appid];
-  dropFanart(appid, ownedRom(appid))
-    .catch(() => undefined)
-    .then(() => rommArt(appid, ownedRom(appid)))
+  rommArt(appid, ownedRom(appid))
     .catch(() => undefined)
     .then(() => (from ? borrowArt(appid, from) : undefined))
     .catch(() => undefined)
-    .then(() => sgdbArt(appid, ownedRom(appid)))
+    .then(() => fillHero(appid, ownedRom(appid)))
     .catch(() => undefined);
 };
+
+// The backgrounds the player may pick on the game's settings, small, and the chosen one put on
+// the entry whole. `choice` null is "only the cover": the background is taken off.
+export type HeroChoice = { id: string; source: "romm" | "sgdb"; data: string; kind: string };
+export const heroChoices = callable<[romId: number], Reply & { choices?: HeroChoice[]; sgdb?: string }>("hero_choices");
+const heroPicture = callable<[romId: number, choice: string], Reply & { data?: string; kind?: string }>("hero_picture");
+export async function pickHero(appid: number, romId: number, choice: string | null): Promise<boolean> {
+  if (choice === null) {
+    safe(() => SteamClient.Apps.ClearCustomArtworkForApp(appid, 1), undefined);
+  } else {
+    const got = await heroPicture(romId, choice).catch(() => null);
+    if (!got?.ok || !got.data || !got.kind) return false;
+    await Promise.resolve(safe(() => SteamClient.Apps.SetCustomArtworkForApp(appid, got.data, got.kind, 1), undefined)).catch(() => undefined);
+  }
+  markPicked(appid);
+  changed();
+  return true;
+}
 
 // The new entry looks like the one it comes from; its cover comes from RomM.
 async function dress(appid: number, romId: number, from: number) {
@@ -250,6 +301,7 @@ async function dress(appid: number, romId: number, from: number) {
   const c = await cover(romId).catch(() => null);
   if (c?.ok) safe(() => SteamClient.Apps.SetCustomArtworkForApp(appid, c.data, c.kind, COVER), undefined);
   await sgdbArt(appid, romId, c?.ok ? [COVER] : [], true).catch(() => undefined);
+  await rommArt(appid, romId, true).catch(() => undefined);
 }
 
 // SteamGridDB, last and only with the player's own key: the pictures the entry still lacks after
@@ -280,7 +332,7 @@ async function sgdbArt(appid: number, romId: number, given: number[] = [], icon 
       const mine = appStore.GetAppOverviewByAppID(appid);
       return mine && typeof appStore[method] === "function" ? (appStore[method](mine) as string[]).length > 0 : true;
     }, true);
-  const lacking = FROM_SGDB.filter(([type, , method]) => !given.includes(type) && !has(method));
+  const lacking = FROM_SGDB.filter(([type, , method]) => !given.includes(type) && !(type === 1 && heroPicked(appid)) && !has(method));
   const kinds: string[] = lacking.map(([, kind]) => kind);
   if (icon) kinds.push("icon");
   if (!kinds.length) return;
@@ -495,9 +547,7 @@ export async function syncLibrary(step: (done: number, total: number) => void): 
     // Pictures from RomM first; then from Tender's entries of the same games, for what is still missing.
     for (const g of games) {
       const appid = ownedAny(versionsOf(g));
-      if (!appid) continue;
-      await dropFanart(appid, ownedRom(appid)).catch(() => undefined);
-      await rommArt(appid, ownedRom(appid)).catch(() => undefined);
+      if (appid) await rommArt(appid, ownedRom(appid)).catch(() => undefined);
     }
     const theirs = await tenderEntries();
     for (const g of games) {
@@ -505,6 +555,10 @@ export async function syncLibrary(step: (done: number, total: number) => void): 
       if (!appid || !from) continue;
       if (!sources()[appid]) setSource(appid, from);
       await borrowArt(appid, sources()[appid]).catch(() => undefined);
+    }
+    for (const g of games) {
+      const appid = ownedAny(versionsOf(g));
+      if (appid) await fillHero(appid, ownedRom(appid)).catch(() => undefined);
     }
     changed();
     return why;

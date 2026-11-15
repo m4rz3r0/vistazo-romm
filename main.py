@@ -562,10 +562,11 @@ COVER_KINDS = ((b"\x89PNG\r\n\x1a\n", "png"), (b"\xff\xd8\xff", "jpg"))
 # The other pictures of a Steam entry, from what RomM keeps of ScreenScraper's media (when RomM
 # is set to keep them): the wide picture behind the page, the logo over it and the wide capsule.
 # Only RomM's own copies are used, never ScreenScraper's addresses (they carry RomM's account).
-# ScreenScraper's fanart is not taken for the hero: it is often of another game of the series. It is
-# still read to tell the heroes once given from it (fanart_hero) and take them off.
-PICTURES = {"logo": ("logo_path",), "wide": ("steamgrid_path",)}
+# ScreenScraper's fanart is the hero only when SteamGridDB has none: its fanart is often of another
+# game of the series. The player can pick another on the game's settings (hero_choices).
+PICTURES = {"hero": ("fanart_path",), "logo": ("logo_path",), "wide": ("steamgrid_path",)}
 FANART = ("fanart_path",)
+HERO_CHOICES = 12  # SteamGridDB's heroes offered to pick from
 STEAM_ROOTS = (os.path.join(".local", "share", "Steam"), os.path.join(".steam", "steam"))
 PICTURE_MAX = 8 * 1024 * 1024
 
@@ -647,6 +648,7 @@ SGDB_KINDS = {
 }
 _sgdb_ids = {}  # name as compared -> SteamGridDB's game id, or None when unsure
 _sgdb_refused = [False]  # whether SteamGridDB turned the key down since it was kept
+_hero_urls = {}  # RomM game -> {SteamGridDB hero id: its picture}, as last offered to pick from
 
 
 def _sgdb_key():
@@ -675,7 +677,10 @@ def _sgdb_match(name, results):
 
 
 def _romm_has(rom, kind):
-    """Whether RomM keeps a picture of this kind for the game: then SteamGridDB is never asked for it."""
+    """Whether RomM keeps a picture of this kind for the game: then SteamGridDB is never asked for it.
+    The hero is asked of SteamGridDB first anyway: RomM's (ScreenScraper's fanart) is the fallback."""
+    if kind == "hero":
+        return False
     if kind == "cover":
         path = _text(rom.get("path_cover_large")).split("?")[0]
         rest = path[len(COVERS):] if path.startswith(COVERS) else ""
@@ -716,6 +721,41 @@ def _sgdb_image(url):
     return (raw, kind) if kind else None
 
 
+def _sgdb_game(key, name):
+    """SteamGridDB's id of the game named `name` (None when unsure), or "refused" / "unreachable"."""
+    want = _sgdb_name(name)
+    if want not in _sgdb_ids:
+        status, found = _sgdb_get(key, "/search/autocomplete/" + urllib.parse.quote(name, safe=""))
+        if status in (401, 403):
+            return "refused"
+        if status != 200 or not isinstance(found, dict):
+            return "unreachable"
+        _sgdb_ids[want] = _sgdb_match(name, found.get("data") if isinstance(found.get("data"), list) else [])
+    return _sgdb_ids[want]
+
+
+def _sgdb_heroes(key, name):
+    """SteamGridDB's heroes for the game named `name`, to pick from: [(id, url, thumb url)], or
+    "refused" / "unreachable"."""
+    game = _sgdb_game(key, name)
+    if game in ("refused", "unreachable") or not game:
+        return game or []
+    endpoint, filters = SGDB_KINDS["hero"]
+    status, found = _sgdb_get(key, "/%s/game/%d" % (endpoint, game), {**filters, **SGDB_PLAIN, "limit": str(HERO_CHOICES)})
+    if status in (401, 403):
+        return "refused"
+    if status != 200 or not isinstance(found, dict):
+        return "unreachable"
+    out = []
+    for item in found.get("data") if isinstance(found.get("data"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        url, thumb, number = item.get("url"), item.get("thumb") or item.get("url"), _number(item.get("id"))
+        if number > 0 and isinstance(url, str) and url.startswith(SGDB_IMAGES) and isinstance(thumb, str) and thumb.startswith(SGDB_IMAGES):
+            out.append((number, url, thumb))
+    return out[:HERO_CHOICES]
+
+
 def _sgdb_icon_file(rom_id, picture):
     """The icon as a file of its own (Steam takes an entry's icon by path); its path, or None."""
     path = os.path.join(SGDB_ICONS, "%d.%s" % (rom_id, picture[1]))
@@ -733,15 +773,9 @@ def _sgdb_icon_file(rom_id, picture):
 def _sgdb_pictures(key, rom_id, name, kinds):
     """The pictures of `kinds` SteamGridDB has for the game named `name`: {kind: (bytes, kind)} with
     "icon" as a path, or "refused" / "unreachable"."""
-    want = _sgdb_name(name)
-    if want not in _sgdb_ids:
-        status, found = _sgdb_get(key, "/search/autocomplete/" + urllib.parse.quote(name, safe=""))
-        if status in (401, 403):
-            return "refused"
-        if status != 200 or not isinstance(found, dict):
-            return "unreachable"
-        _sgdb_ids[want] = _sgdb_match(name, found.get("data") if isinstance(found.get("data"), list) else [])
-    game = _sgdb_ids[want]
+    game = _sgdb_game(key, name)
+    if game in ("refused", "unreachable"):
+        return game
     out = {}
     if not game:
         return out
@@ -3139,7 +3173,7 @@ class Plugin:
             return {"ok": False, "why": "cover"}
         return {"ok": True, "data": base64.b64encode(cover[0]).decode("ascii"), "kind": cover[1]}
 
-    async def game_pictures(self, rom_id, kinds=("logo", "wide")):
+    async def game_pictures(self, rom_id, kinds=("hero", "logo", "wide")):
         """The entry's other pictures that RomM keeps: {"ok": True, kind: {"data", "kind"}}
         for each of `kinds` RomM has; the ones it lacks are left out."""
         rom_id = _number(rom_id)
@@ -3160,8 +3194,9 @@ class Plugin:
 
     async def fanart_hero(self, appid, rom_id):
         """Whether the entry's hero is ScreenScraper's fanart RomM keeps for the game (given by an
-        earlier version, or copied from Tender's entry): {"ok": True, "same": bool}. Then the
-        frontend takes it off. Only the bytes are compared: a hero the player chose stays."""
+        earlier version, or copied from Tender's entry): {"ok": True, "same": bool}. With a
+        SteamGridDB key the frontend then takes it off so SteamGridDB's comes first. Only the bytes
+        are compared: a hero the player chose stays."""
         appid, rom_id = _number(appid), _number(rom_id)
         server, key = _games_key()
         if not server or rom_id <= 0 or appid <= 0:
@@ -3175,6 +3210,60 @@ class Plugin:
             return {"ok": False, "why": why}
         fanart = await loop.run_in_executor(None, _picture, server, key, rom, "fanart")
         return {"ok": True, "same": bool(fanart) and fanart[0] in heroes}
+
+    async def hero_choices(self, rom_id):
+        """The backgrounds the player may pick for a game, small: {"ok": True, "choices": [{"id",
+        "source", "data", "kind"}], "sgdb": "on" | "off" | "refused" | "unreachable"}. RomM's copy of
+        ScreenScraper's fanart first (id "romm"), then SteamGridDB's heroes ("sgdb:<id>") with the
+        player's key. hero_picture hands over the chosen one whole."""
+        rom_id = _number(rom_id)
+        server, key = _games_key()
+        if not server or rom_id <= 0:
+            return {"ok": False, "why": key if not server else "game"}
+        loop = asyncio.get_running_loop()
+        rom, why = await loop.run_in_executor(None, _rom, server, key, rom_id)
+        if not rom:
+            return {"ok": False, "why": why}
+        choices = []
+        fanart = await loop.run_in_executor(None, _picture, server, key, rom, "fanart")
+        if fanart:
+            choices.append({"id": "romm", "source": "romm", "data": base64.b64encode(fanart[0]).decode("ascii"), "kind": fanart[1]})
+        sgdb_key, name = _sgdb_key(), _text(rom.get("name")).strip()
+        sgdb = "on" if sgdb_key else "off"
+        if sgdb_key and name:
+            heroes = await loop.run_in_executor(None, _sgdb_heroes, sgdb_key, name)
+            if isinstance(heroes, str):
+                sgdb = heroes
+                if heroes == "refused":
+                    _sgdb_refused[0] = True
+            else:
+                _hero_urls[rom_id] = {number: url for number, url, _ in heroes}
+                for number, _, thumb in heroes:
+                    got = await loop.run_in_executor(None, _sgdb_image, thumb)
+                    if got:
+                        choices.append({"id": "sgdb:%d" % number, "source": "sgdb", "data": base64.b64encode(got[0]).decode("ascii"), "kind": got[1]})
+        return {"ok": True, "choices": choices, "sgdb": sgdb}
+
+    async def hero_picture(self, rom_id, choice):
+        """The whole picture of one of hero_choices: {"ok": True, "data", "kind"}. Only what
+        hero_choices offered for this game can be asked for."""
+        rom_id, choice = _number(rom_id), _text(choice)
+        server, key = _games_key()
+        if not server or rom_id <= 0:
+            return {"ok": False, "why": key if not server else "game"}
+        loop = asyncio.get_running_loop()
+        got = None
+        if choice == "romm":
+            rom, why = await loop.run_in_executor(None, _rom, server, key, rom_id)
+            if not rom:
+                return {"ok": False, "why": why}
+            got = await loop.run_in_executor(None, _picture, server, key, rom, "fanart")
+        elif choice.startswith("sgdb:"):
+            url = _hero_urls.get(rom_id, {}).get(_number(choice[5:]))
+            got = await loop.run_in_executor(None, _sgdb_image, url) if url else None
+        if not got:
+            return {"ok": False, "why": "picture"}
+        return {"ok": True, "data": base64.b64encode(got[0]).decode("ascii"), "kind": got[1]}
 
     async def sgdb_status(self):
         """Whether pictures may come from SteamGridDB (a key is kept), and "refused" when it

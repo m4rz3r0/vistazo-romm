@@ -966,12 +966,21 @@ def test_cover():
     before = len(romm.calls)
     got = run(plugin.game_pictures(20, ["hero", "logo", "wide", "nonsense"]))
     b64 = __import__("base64").b64decode
-    check("pictures RomM keeps, never its fanart as the hero", (got["ok"], "hero" in got, b64(got["logo"]["data"]), got["logo"]["kind"], "wide" in got),
-          (True, False, png, "png", False))
+    check("pictures RomM keeps", (got["ok"], b64(got["hero"]["data"]), got["hero"]["kind"], b64(got["logo"]["data"]), got["logo"]["kind"], "wide" in got),
+          (True, jpg, "jpg", png, "png", False))
     check("pictures: only RomM's own folder asked", sorted(c[1].split("?")[0] for c in romm.calls[before:]),
-          ["/api/roms/20", "/assets/romm/resources/roms/1/20/logo/logo.png"])
+          ["/api/roms/20", "/assets/romm/resources/roms/1/20/fanart/fanart.jpg", "/assets/romm/resources/roms/1/20/logo/logo.png"])
     check("only the kinds asked for", sorted(k for k in run(plugin.game_pictures(20, ["logo"])) if k != "ok"), ["logo"])
-    check("the default leaves the hero out", "hero" in run(plugin.game_pictures(20)), False)
+
+    # The backgrounds to pick from without a SteamGridDB key: RomM's fanart only.
+    got = run(plugin.hero_choices(20))
+    check("hero choices without a key", (got["ok"], got["sgdb"], [(c["id"], c["source"], b64(c["data"]), c["kind"]) for c in got["choices"]]),
+          (True, "off", [("romm", "romm", jpg, "jpg")]))
+    got = run(plugin.hero_picture(20, "romm"))
+    check("hero picked: RomM's", (got["ok"], b64(got["data"]), got["kind"]), (True, jpg, "jpg"))
+    check("hero picked: one never offered", run(plugin.hero_picture(20, "sgdb:99")), {"ok": False, "why": "picture"})
+    check("hero picked: nonsense", run(plugin.hero_picture(20, "../etc")), {"ok": False, "why": "picture"})
+    check("hero choices: unknown game", run(plugin.hero_choices(999))["ok"], False)
 
     # A hero given from that fanart by an earlier version is told apart by its bytes, in every
     # Steam account and either Steam folder; any other hero is the player's and stays.
@@ -1119,6 +1128,33 @@ def test_steamgriddb():
         check("nothing asked for them", sgdb.calls, [])
         check("the hero comes from SteamGridDB even with RomM's fanart", sorted(k for k in run(plugin.sgdb_pictures(23, ["hero"])) if k != "ok"), ["hero"])
         check("what RomM lacks still comes", sorted(k for k in run(plugin.sgdb_pictures(23, ["cover", "wide"])) if k != "ok"), ["wide"])
+
+        # Backgrounds to pick from: RomM's fanart first, then SteamGridDB's heroes, small; the one
+        # picked comes whole, and only one that was offered for that game.
+        fanart = b"\xff\xd8\xff" + b"fanart 23"
+        romm.covers["f.jpg"] = fanart
+        sgdb.images.update({"h1.jpg": jpg + b"1", "h1t.jpg": jpg + b"t1", "h2.png": png + b"2", "h2t.png": png + b"t2"})
+        sgdb.art[("heroes", 9)] = [
+            {"id": 31, "url": SGDB_URL + "/img/h1.jpg", "thumb": SGDB_URL + "/img/h1t.jpg"},
+            {"id": 32, "url": SGDB_URL + "/img/h2.png", "thumb": SGDB_URL + "/img/h2t.png"},
+            {"id": 33, "url": OTHER + "/img/h1.jpg", "thumb": OTHER + "/img/h1t.jpg"},
+            {"id": 34, "url": SGDB_URL + "/img/page.png", "thumb": SGDB_URL + "/img/page.png"},
+        ]
+        sgdb.calls.clear()
+        got = run(plugin.hero_choices(23))
+        check("hero choices", (got["ok"], got["sgdb"], [(c["id"], base64.b64decode(c["data"]), c["kind"]) for c in got["choices"]]),
+              (True, "on", [("romm", fanart, "jpg"), ("sgdb:31", jpg + b"t1", "jpg"), ("sgdb:32", png + b"t2", "png")]))
+        check("hero choices: as many as offered", any("limit=%d" % main.HERO_CHOICES in p for p, _ in sgdb.calls), True)
+        check("hero choices: only thumbnails fetched", sorted(p for p, _ in sgdb.calls if p.startswith("/img/")), ["/img/h1t.jpg", "/img/h2t.png", "/img/page.png"])
+        got = run(plugin.hero_picture(23, "sgdb:32"))
+        check("hero picked: SteamGridDB's, whole", (got["ok"], base64.b64decode(got["data"]), got["kind"]), (True, png + b"2", "png"))
+        check("hero picked: from elsewhere never", run(plugin.hero_picture(23, "sgdb:33")), {"ok": False, "why": "picture"})
+        check("hero picked: another game's", run(plugin.hero_picture(21, "sgdb:32")), {"ok": False, "why": "picture"})
+        sgdb.refuse = True
+        got = run(plugin.hero_choices(23))
+        check("hero choices: key refused", (got["sgdb"], [c["id"] for c in got["choices"]]), ("refused", ["romm"]))
+        sgdb.refuse = False
+        _ = run(plugin.sgdb_set_key(SGDB_KEY))
 
         # When unsure, nothing: two games with that name, or none with it exactly.
         sgdb.calls.clear()
