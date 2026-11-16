@@ -55,6 +55,10 @@ It does nothing without Vistazo installed.
 - **Save games** (DS and Wii for now). When a game played from its Vistazo entry closes, its save goes
   to RomM; a newer one on RomM is brought only when the Deck's has not changed, and only after keeping a copy of it.
   When both changed, nothing is touched until you choose on the game's page. A short notice says what happened.
+  The save is also checked right as a game starts, before the emulator opens it: a newer one played on another device
+  is brought first (the start waits a few seconds for it). When RomM cannot be asked, or both changed, the game starts
+  as it is and a notice warns not to save over it. A save RomM did not take when the game closed is sent again later,
+  and when Steam next starts.
 - **Pictures.** Each entry gets its cover from RomM and, when RomM keeps them, ScreenScraper's logo and fanart
   (in RomM's `config.yml`, add `fanart` and `logo` to `scan.media`, then rescan with "update").
   The logo and wide picture RomM lacks are copied from Tender's entry of the same game while Tender is installed.

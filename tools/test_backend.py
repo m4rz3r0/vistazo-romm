@@ -1758,6 +1758,83 @@ def test_bios_all():
     romm.platforms, romm.firmware = [], []
 
 
+def test_start_save():
+    # Right before a game starts the launcher asks, and a save played on another device is
+    # brought first: the emulator must not open an old one.
+    import socket
+    saves = os.path.join(HOME, "retrodeck", "saves")
+    save = os.path.join(saves, "nds", "Start.srm")
+    romm.roms[61] = rom(61, "Start.nds")
+    with open(os.path.join(ROMS, "nds", "Start.nds"), "wb") as f:
+        f.write(DATA)
+
+    def write(data):
+        with open(save, "wb") as f:
+            f.write(data)
+
+    def read():
+        with open(save, "rb") as f:
+            return f.read()
+
+    told = []
+
+    async def emit(*args):
+        told.append(args)
+
+    decky.emit = emit
+    try:
+        check("taken", run(plugin.game_take(6100, 61))["installed"], True)
+        write(b"played here")
+        check("sent", run(plugin.save_sync(6100))["state"], "sent")
+        add_save(61, b"played on the PC", "Start.srm")
+        check("at start: brought", (run(plugin.save_before_start("61")), read()), ({"state": "brought"}, b"played on the PC"))
+        check("at start: the frontend is told", told[-1], ("vistazo_romm_start_save", 6100, "brought"))
+        check("at start: in step, nothing moves", (run(plugin.save_before_start(61))["state"], read()), ("synced", b"played on the PC"))
+        check("at start: not one of its games", run(plugin.save_before_start(999)), {"state": "game"})
+        check("at start: not a number", run(plugin.save_before_start("61; rm"))["state"], "game")
+
+        # Past the deadline the emulator may be reading the save: never replaced.
+        add_save(61, b"newer still", "Start.srm")
+        server, key = main._games_key()
+        with open(main.GAMES_FILE) as f:
+            game = json.load(f)["games"]["6100"]
+        out, record = main._sync_save(server, key, game, "", time.monotonic() - 1)
+        check("too late: nothing replaced", (out, record, read()), ({"state": "late"}, None, b"played on the PC"))
+
+        # The launcher's own question, over its socket: answered once the save is in step.
+        run(plugin._main())
+        check("socket for this user only", mode(main.LAUNCH_SOCKET), 0o600)
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as c:
+            c.settimeout(20)
+            c.connect(main.LAUNCH_SOCKET)
+            c.sendall(b"61\n")
+            answer = c.recv(64)
+        check("the launcher is answered", (answer, read()), (b"brought\n", b"newer still"))
+
+        # RomM not answering: said so, and the save here is left as it is.
+        tokens = dict(romm.tokens)
+        with open(main.KEY_FILE, "rb") as f:
+            linked = f.read()
+        romm.tokens.clear()
+        got = run(plugin.save_before_start(61))
+        romm.tokens.update(tokens)
+        with open(main.KEY_FILE, "wb") as f:  # a refused key is forgotten: put back for what follows
+            f.write(linked)
+        check("RomM refusing: said, nothing touched", (got["state"], read(), told[-1][2]), ("refused", b"newer still", "refused"))
+
+        # An older Decky without events: the game starts all the same.
+        del decky.emit
+        check("no events: still answered", run(plugin.save_before_start(61))["state"], "synced")
+        run(plugin._unload())
+        check("socket gone when unloaded", os.path.exists(main.LAUNCH_SOCKET), False)
+        run(plugin._main())
+    finally:
+        if hasattr(decky, "emit"):
+            del decky.emit
+        run(plugin.game_remove(6100))
+        romm.roms.pop(61, None)
+
+
 def test_saves():
     cfg = os.path.join(HOME, main.RETROARCH_CFG)
     os.makedirs(os.path.dirname(cfg))
@@ -2426,7 +2503,8 @@ b</command>
     subprocess.run([main.LAUNCHER, "43"], env=env, capture_output=True, text=True)
     with open(seen) as f:
         check("started with it", json.load(f), ["run", "net.retrodeck.retrodeck", "-e", melon, target])
-    check("the old 'another emulator' state is not kept", run(plugin.save_state(4300))["state"], "unknown")
+    # Starting the game asked for its save to be put in step (there is none anywhere yet).
+    check("the old 'another emulator' state is not kept", run(plugin.save_state(4300))["state"], "none")
     check("saves again", run(plugin.save_sync(4300))["state"] != "emulator", True)
     # A list where the emulator is not a plain line is not believed.
     with open(main.LAUNCH_FILE) as f:
@@ -2977,6 +3055,7 @@ try:
     test_discs()
     test_device()
     test_input()
+    test_start_save()
     print("ok: %d checks" % checks)
 finally:
     server.shutdown()

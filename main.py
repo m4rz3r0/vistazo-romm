@@ -266,6 +266,12 @@ RUNTIME = decky.DECKY_PLUGIN_RUNTIME_DIR
 LAUNCHER = os.path.join(RUNTIME, "vistazo-launch")
 LAUNCH_FILE = os.path.join(RUNTIME, "launch.json")
 LAUNCHER_SOURCE = os.path.join(decky.DECKY_PLUGIN_DIR, "bin", "vistazo-launch")
+# Where the launcher asks, right before a game starts, for its save to be brought in step with
+# RomM (another device may have played since): a socket beside it, for this user only. The
+# launcher waits a little longer than LAUNCH_WAIT, after which no save is replaced any more.
+LAUNCH_SOCKET = os.path.join(RUNTIME, "launch.sock")
+LAUNCH_WAIT = 20
+_launch_server = [None]
 # RomM's platform -> RetroDECK's folder for it. Only the systems in use; more as they are needed.
 SYSTEMS = {
     "nds": "nds", "nintendo-ds": "nds",
@@ -2192,12 +2198,13 @@ def _send_save(server, key, rom_id, kind, path, name=""):
     return reply
 
 
-def _sync_save(server, key, game, choice=""):
+def _sync_save(server, key, game, choice="", deadline=None):
     """Brings one game's save in step with RomM. Returns ({"state": ...}, what to remember).
     States: "synced" (nothing to do), "sent", "brought", "none" (no save anywhere yet),
     "conflict" (both changed: nothing touched; `choice` "deck" or "romm" settles it), or why it
     could not be done ("unsupported", "not-installed", "layout", "unreachable", "refused",
-    "disk", "save")."""
+    "disk", "save"). With `deadline` (time.monotonic()), a save is not replaced after it: the
+    game is being started then, and its emulator may already be reading the save."""
     path, kind = _save_file(game)
     if path is None:
         return {"state": kind}, None
@@ -2234,6 +2241,8 @@ def _sync_save(server, key, game, choice=""):
             now_here = _save_here(path, kind) and not os.path.islink(path)
             if now_here != here or (now_here and _save_hash(path, kind) != mine):
                 return {"state": "busy"}, None
+            if deadline is not None and time.monotonic() > deadline:
+                return {"state": "late"}, None
             if here:
                 _copy_aside(path, kind)  # raises when the copy cannot be made: then nothing is replaced
             if kind[3]:
@@ -3167,8 +3176,9 @@ class Plugin:
     async def save_sync(self, appid, choice=""):
         """Brings this game's save in step with RomM (see _sync_save). Never while a download of
         the game is under way; the frontend never asks while the game is running."""
-        appid = _number(appid)
-        choice = choice if choice in ("deck", "romm") else ""
+        return await self._save_sync(_number(appid), choice if choice in ("deck", "romm") else "")
+
+    async def _save_sync(self, appid, choice="", deadline=None):
         server, key = _games_key()
         if not server:
             return {"state": key}
@@ -3183,7 +3193,7 @@ class Plugin:
             return {"state": "busy"}
         _saving.add(appid)
         try:
-            out, record = await asyncio.get_running_loop().run_in_executor(None, _sync_save, server, key, game, choice)
+            out, record = await asyncio.get_running_loop().run_in_executor(None, _sync_save, server, key, game, choice, deadline)
         finally:
             _saving.discard(appid)
         with _lock:
@@ -4063,7 +4073,51 @@ class Plugin:
             choice = _read_layouts().get(_text(game.get("system")), "")
         return {"ok": True, "url": _layout_url(choice) if choice else ""}
 
+    async def save_before_start(self, rom_id):
+        """The launcher asks this right before it starts a game (see _launch_asked): the save is
+        brought in step with RomM while the emulator is not yet running. Answers the state, and
+        tells the frontend, which says on screen what the player should know (a newer save was
+        brought; RomM could not be asked; both changed)."""
+        rom_id = _number(rom_id)
+        with _lock:
+            games = _read_games()["games"]
+        appid = next((_number(a) for a, g in games.items() if isinstance(g, dict) and _number(g.get("rom_id")) == rom_id), 0)
+        if rom_id <= 0 or not appid:
+            return {"state": "game"}
+        out = await self._save_sync(appid, "", time.monotonic() + LAUNCH_WAIT)
+        try:
+            await decky.emit("vistazo_romm_start_save", appid, out["state"])
+        except Exception as e:  # an older Decky without events: the game starts all the same
+            decky.logger.warning("Start notice not sent: %s", e)
+        return out
+
+    async def _launch_asked(self, reader, writer):
+        """One question from the launcher over its socket: a game's number in RomM, answered with
+        the state of its save once it is in step (or could not be)."""
+        try:
+            line = await asyncio.wait_for(reader.readline(), 2)
+            out = await self.save_before_start(line.decode("ascii", "ignore").strip())
+            writer.write((_text(out.get("state")) + "\n").encode("ascii", "ignore"))
+            await writer.drain()
+        except Exception as e:
+            decky.logger.warning("Launcher not answered: %s", e)
+        finally:
+            try:
+                writer.close()
+            except Exception:
+                pass
+
     async def _main(self):
+        try:
+            os.makedirs(RUNTIME, exist_ok=True)
+            try:
+                os.remove(LAUNCH_SOCKET)
+            except OSError:
+                pass
+            _launch_server[0] = await asyncio.start_unix_server(self._launch_asked, path=LAUNCH_SOCKET)
+            os.chmod(LAUNCH_SOCKET, 0o600)
+        except Exception as e:  # without it games start as before, unchecked
+            decky.logger.warning("Launch socket not opened: %s", e)
         _move_in()
         with _lock:
             data = _read_games()
@@ -4076,5 +4130,12 @@ class Plugin:
                 _sweep_parts()
 
     async def _unload(self):
+        if _launch_server[0] is not None:
+            _launch_server[0].close()
+            _launch_server[0] = None
+        try:
+            os.remove(LAUNCH_SOCKET)
+        except OSError:
+            pass
         for job in list(_jobs.values()):
             job["cancel"].set()

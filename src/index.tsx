@@ -1,4 +1,4 @@
-import { definePlugin } from "@decky/api";
+import { addEventListener, definePlugin, removeEventListener } from "@decky/api";
 import { PanelSection, PanelSectionRow, showModal } from "@decky/ui";
 import { useEffect, useState } from "react";
 import { Addon, AddonAction, AddonFile, AddonGame, AddonProgress, CONTRACT, VistazoApi } from "./contract";
@@ -29,7 +29,7 @@ import { Settings } from "./Rows";
 import { HeroModal } from "./Hero";
 import { tuckAway } from "./tuck";
 import { ownGames, syncSaves } from "./settings";
-import { tellBios, tellSave } from "./notify";
+import { tellBios, tellSave, tellStart } from "./notify";
 
 // Vistazo RomM hands Vistazo what it knows of RomM games; Vistazo draws it. Without Vistazo
 // installed there is nothing to show them on, and the panel says so.
@@ -37,10 +37,11 @@ const vistazo = (): VistazoApi | null => (window as any).Vistazo ?? null;
 
 declare const SteamClient: any;
 
-// The game's save against RomM's, for its page. RomM is asked after a game, when the save here
-// changed, when the last try did not end well, and otherwise only now and then: nothing changes
-// in between on a Deck that is the only place the game is played.
-const SAVE_GOOD = 6 * 60 * 60 * 1000;
+// The game's save against RomM's, for its page. RomM is asked after a game, right before one
+// starts (the launcher asks the backend), when the save here changed, when the last try did not
+// end well, and whenever its page opens, bar a minute after the last answer: the game may have
+// been played on another device meanwhile.
+const SAVE_GOOD = 60 * 1000;
 const saveAsked = new Map<number, number>();
 const saveWord = (state: string): AddonGame["save"] =>
   ["synced", "sent", "brought"].includes(state) ? "synced" : state === "conflict" ? "conflict" : state === "none" ? undefined : "pending";
@@ -60,7 +61,7 @@ async function save(appid: number, anew: boolean): Promise<AddonGame["save"]> {
 }
 // RomM asleep or still waking when the page opened: asked again a little later, and the page
 // told once the answer is in, so it does not stay on "pending" until it is opened again.
-const SAVE_RETRIES = [15_000, 45_000, 120_000];
+const SAVE_RETRIES = [15_000, 45_000, 120_000, 300_000, 900_000, 1_800_000, 3_600_000];
 const saveRetrying = new Set<number>();
 function retrySave(appid: number, attempt = 0) {
   if (attempt === 0 && saveRetrying.has(appid)) return;
@@ -108,15 +109,42 @@ function watchSaves(): () => void {
           saveSync(appid, "")
             .then((now) => {
               if (now && !["unreachable", "refused", "busy"].includes(now.state)) saveAsked.set(appid, Date.now());
+              // RomM not answering right now: the save must still get there, so it is tried again.
+              else retrySave(appid);
               tellSave(appid, now?.state);
               tellChanged();
             })
-            .catch(() => undefined);
+            .catch(() => retrySave(appid));
         }, 3000);
       }),
     null as any,
   );
   return () => safe(() => reg?.unregister(), undefined);
+}
+
+// What the backend found of a save right as its game started: said on screen, and its page told.
+function watchStarts(): () => void {
+  const heard = (appid: number, state: string) => {
+    if (["synced", "sent", "brought", "conflict", "none"].includes(state)) saveAsked.set(appid, Date.now());
+    tellStart(appid, state);
+    tellChanged();
+  };
+  safe(() => addEventListener<[number, string]>("vistazo_romm_start_save", heard), undefined);
+  return () => safe(() => removeEventListener("vistazo_romm_start_save", heard), undefined);
+}
+
+// When Steam starts: any save that never got to RomM (it was not answering when the game closed,
+// or the device was turned off first) is sent now, so another device finds it.
+async function catchUpSaves() {
+  if (!syncSaves() || !ownGames()) return;
+  for (const appid of ownedApps()) {
+    if (running(appid)) continue;
+    const known = await saveState(appid).catch(() => null);
+    if (!known || !(known.changed || ["unreachable", "refused", "busy", "late", "disk"].includes(known.state))) continue;
+    const now = await saveSync(appid, "").catch(() => null);
+    if (now && !["unreachable", "refused", "busy"].includes(now.state)) saveAsked.set(appid, Date.now());
+    else retrySave(appid);
+  }
 }
 
 async function game(appid: number, refresh: boolean): Promise<AddonGame | null> {
@@ -310,6 +338,9 @@ export default definePlugin(() => {
   const disconnect = connect();
   const untuck = tuckAway("Vistazo RomM", "vistazo-romm");
   const stopSaves = watchSaves();
+  const stopStarts = watchStarts();
+  // Once the list of its games is read and RomM has had a moment to answer.
+  setTimeout(() => void catchUpSaves().catch(() => undefined), 20_000);
   return {
     name: "Vistazo RomM",
     titleView: <div>Vistazo RomM</div>,
@@ -319,6 +350,7 @@ export default definePlugin(() => {
       disconnect();
       untuck();
       stopSaves();
+      stopStarts();
     },
   };
 });

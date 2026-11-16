@@ -9,6 +9,8 @@ import stat
 import sys
 
 RETRODECK = "net.retrodeck.retrodeck"
+# How long the save is waited for: a little longer than Vistazo RomM takes at most (LAUNCH_WAIT).
+WAIT = 25
 
 
 def fail(why):
@@ -54,6 +56,23 @@ def game_path(table_file, rom_id):
     return (path, emulator), None
 
 
+def save_in_step(here, rom_id):
+    """Asks Vistazo RomM, when it is running, to bring the game's save in step with RomM before
+    the emulator opens it (another device may have played since), and waits for its answer. Any
+    trouble, or no answer in time, and the game starts as it is: Vistazo says so on screen."""
+    import socket
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(2)
+            s.connect(os.path.join(here, "launch.sock"))
+            s.sendall(rom_id.encode("ascii") + b"\n")
+            s.settimeout(WAIT)
+            while s.recv(64):
+                pass
+    except (OSError, ValueError):
+        pass
+
+
 def main(argv):
     if len(argv) != 2:
         return fail("expected one game number")
@@ -62,6 +81,7 @@ def main(argv):
     if found is None:
         return fail(why)
     path, emulator = found
+    save_in_step(here, argv[1])
     try:
         os.execvp("flatpak", ["flatpak", "run", RETRODECK] + (["-e", emulator] if emulator else []) + [path])
     except OSError as e:

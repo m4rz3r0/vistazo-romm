@@ -9,8 +9,17 @@ declare const appStore: any;
 const name = (appid: number): string =>
   safe(() => String(appStore.GetAppOverviewByAppID(appid)?.display_name ?? ""), "").replace(/\s*·\s*Vistazo$/, "");
 
-function show(appid: number, body: string) {
-  safe(() => toaster.toast({ title: name(appid) || "RomM", body, duration: 5000 }), undefined);
+function show(appid: number, body: string, duration = 5000) {
+  safe(() => toaster.toast({ title: name(appid) || "RomM", body, duration }), undefined);
+}
+
+// Right as a game starts, its save was put in step with RomM (or could not be). Only what the
+// player must know before playing on: a newer save came, or this one may not be the newest.
+export function tellStart(appid: number, state: string | undefined) {
+  const s = state ?? "unreachable";
+  if (["synced", "sent", "none", "unsupported", "not-installed", "game", "emulator", "layout"].includes(s)) return;
+  if (s === "brought") return show(appid, t.noteStartBrought, 7000);
+  show(appid, s === "conflict" ? t.noteStartConflict : s === "refused" ? t.noteRefused : t.noteStartUnchecked, 12000);
 }
 
 export function tellSave(appid: number, state: string | undefined) {
