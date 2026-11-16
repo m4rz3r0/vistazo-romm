@@ -10,7 +10,7 @@ import sys
 
 RETRODECK = "net.retrodeck.retrodeck"
 # How long the save is waited for: a little longer than Vistazo RomM takes at most (LAUNCH_WAIT).
-WAIT = 25
+WAIT = 30
 
 
 def fail(why):

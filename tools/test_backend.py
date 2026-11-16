@@ -1811,6 +1811,37 @@ def test_start_save():
             answer = c.recv(64)
         check("the launcher is answered", (answer, read()), (b"brought\n", b"newer still"))
 
+        # The game's page was opened and Play pressed at once: the page's look at the save is still
+        # bringing RomM's. The start waits for it, and the game starts on what it brought.
+        add_save(61, b"played on the PC again", "Start.srm")
+        hold = threading.Event()
+        romm.meanwhile = lambda: hold.wait(10)
+        page = asyncio.run_coroutine_threadsafe(plugin.save_sync(6100), loop)
+        time.sleep(0.3)
+        start = asyncio.run_coroutine_threadsafe(plugin.save_before_start(61), loop)
+        time.sleep(0.3)
+        check("the start waits for the look under way", start.done(), False)
+        hold.set()
+        check("then starts on what it brought", (page.result(20)["state"], start.result(20)["state"], read()),
+              ("brought", "synced", b"played on the PC again"))
+
+        # It takes too long: the game starts as it is, and the look under way replaces nothing
+        # any more, since the emulator may be reading the save.
+        add_save(61, b"too slow to bring", "Start.srm")
+        hold.clear()
+        wait = main.LAUNCH_WAIT
+        main.LAUNCH_WAIT = 0.5
+        page = asyncio.run_coroutine_threadsafe(plugin.save_sync(6100), loop)
+        time.sleep(0.3)
+        got = run(plugin.save_before_start(61))
+        main.LAUNCH_WAIT = wait
+        hold.set()
+        check("too slow: started as it is, said so", (got["state"], told[-1][2]), ("busy", "busy"))
+        check("too slow: nothing replaced under the game", (page.result(20)["state"], read()), ("late", b"played on the PC again"))
+        romm.meanwhile = None
+        # Once the game has closed the save is looked at again, and brought as ever.
+        check("after the game: brought", (run(plugin.save_sync(6100))["state"], read()), ("brought", b"too slow to bring"))
+
         # RomM not answering: said so, and the save here is left as it is.
         tokens = dict(romm.tokens)
         with open(main.KEY_FILE, "rb") as f:
@@ -1820,7 +1851,7 @@ def test_start_save():
         romm.tokens.update(tokens)
         with open(main.KEY_FILE, "wb") as f:  # a refused key is forgotten: put back for what follows
             f.write(linked)
-        check("RomM refusing: said, nothing touched", (got["state"], read(), told[-1][2]), ("refused", b"newer still", "refused"))
+        check("RomM refusing: said, nothing touched", (got["state"], read(), told[-1][2]), ("refused", b"too slow to bring", "refused"))
 
         # An older Decky without events: the game starts all the same.
         del decky.emit

@@ -272,6 +272,7 @@ LAUNCHER_SOURCE = os.path.join(decky.DECKY_PLUGIN_DIR, "bin", "vistazo-launch")
 LAUNCH_SOCKET = os.path.join(RUNTIME, "launch.sock")
 LAUNCH_WAIT = 20
 _launch_server = [None]
+_released = {}  # appid -> when (time.monotonic()) its launcher was last told to go on and start it
 # RomM's platform -> RetroDECK's folder for it. Only the systems in use; more as they are needed.
 SYSTEMS = {
     "nds": "nds", "nintendo-ds": "nds",
@@ -2198,13 +2199,14 @@ def _send_save(server, key, rom_id, kind, path, name=""):
     return reply
 
 
-def _sync_save(server, key, game, choice="", deadline=None):
+def _sync_save(server, key, game, choice="", deadline=None, late=None):
     """Brings one game's save in step with RomM. Returns ({"state": ...}, what to remember).
     States: "synced" (nothing to do), "sent", "brought", "none" (no save anywhere yet),
     "conflict" (both changed: nothing touched; `choice` "deck" or "romm" settles it), or why it
     could not be done ("unsupported", "not-installed", "layout", "unreachable", "refused",
-    "disk", "save"). With `deadline` (time.monotonic()), a save is not replaced after it: the
-    game is being started then, and its emulator may already be reading the save."""
+    "disk", "save"). A save is not replaced after `deadline` (time.monotonic()), nor once `late()`
+    says so: the game is being started then, and its emulator may already be reading the save
+    (the answer is "late")."""
     path, kind = _save_file(game)
     if path is None:
         return {"state": kind}, None
@@ -2241,7 +2243,7 @@ def _sync_save(server, key, game, choice="", deadline=None):
             now_here = _save_here(path, kind) and not os.path.islink(path)
             if now_here != here or (now_here and _save_hash(path, kind) != mine):
                 return {"state": "busy"}, None
-            if deadline is not None and time.monotonic() > deadline:
+            if (deadline is not None and time.monotonic() > deadline) or (late is not None and late()):
                 return {"state": "late"}, None
             if here:
                 _copy_aside(path, kind)  # raises when the copy cannot be made: then nothing is replaced
@@ -3192,8 +3194,11 @@ class Plugin:
         if appid in _saving:
             return {"state": "busy"}
         _saving.add(appid)
+        # A game let start after this began may be reading its save: then nothing is replaced.
+        began = time.monotonic()
+        late = lambda: _released.get(appid, 0.0) > began
         try:
-            out, record = await asyncio.get_running_loop().run_in_executor(None, _sync_save, server, key, game, choice, deadline)
+            out, record = await asyncio.get_running_loop().run_in_executor(None, _sync_save, server, key, game, choice, deadline, late)
         finally:
             _saving.discard(appid)
         with _lock:
@@ -4084,7 +4089,16 @@ class Plugin:
         appid = next((_number(a) for a, g in games.items() if isinstance(g, dict) and _number(g.get("rom_id")) == rom_id), 0)
         if rom_id <= 0 or not appid:
             return {"state": "game"}
-        out = await self._save_sync(appid, "", time.monotonic() + LAUNCH_WAIT)
+        deadline = time.monotonic() + LAUNCH_WAIT
+        try:
+            # Another look at this save may be under way (its page was just opened): waited for,
+            # so the game starts on what it leaves. Past the wait it must not replace the save.
+            while appid in _saving and time.monotonic() < deadline:
+                await asyncio.sleep(0.1)
+            out = await self._save_sync(appid, "", deadline)
+        finally:
+            # From here the launcher starts the emulator: whatever began before may replace nothing.
+            _released[appid] = time.monotonic()
         try:
             await decky.emit("vistazo_romm_start_save", appid, out["state"])
         except Exception as e:  # an older Decky without events: the game starts all the same
