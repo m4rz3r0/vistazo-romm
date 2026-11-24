@@ -9,6 +9,7 @@ import datetime
 import json
 import os
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -1341,6 +1342,108 @@ def test_launcher():
     for appid in (700, 800):
         run(plugin.game_release(appid))
     os.remove(nasty)
+
+
+# What runs under the launcher on the PC, played by small scripts: flatpak, the sandbox's first
+# process (which, like bwrap's, a SIGTERM from outside does not reach), RetroDECK's shell script
+# (which dies at once on SIGTERM, and has work of its own once the emulator is gone) and the
+# emulator (which, like Dolphin, stops on SIGTERM and quits outright on a second one).
+TREE = r"""import json, os, signal, subprocess, sys, time
+role, log = sys.argv[1], sys.argv[2]
+def note(*what):
+    with open(log, "a") as f:
+        f.write(json.dumps([role, os.getpid()] + list(what)) + "\n")
+note("up")
+if role == "emulator":
+    got = []
+    def on(number, frame):
+        got.append(number)
+        note("signal", number)
+    for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(number, on)
+    while not got and not os.path.exists(log + ".quit"):
+        time.sleep(0.05)
+    if not got:
+        sys.exit(5)
+    time.sleep(0.5)  # saving as it closes
+    sys.exit(1 if len(got) > 1 else 0)
+if role == "sandbox":
+    for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(number, signal.SIG_IGN)
+below = {"flatpak": "sandbox", "sandbox": "wrapper", "wrapper": "emulator"}[role]
+code = subprocess.call([sys.executable, __file__, below, log])
+note("after", code)
+sys.exit(code)
+"""
+
+
+def test_launcher_stop():
+    game = os.path.join(ROMS, "nds", "Stop.nds")
+    with open(game, "wb") as f:
+        f.write(b"rom")
+    with open(main.LAUNCH_FILE) as f:
+        kept = f.read()
+    with open(main.LAUNCH_FILE, "w") as f:
+        json.dump({"9": game}, f)
+    fake_bin = os.path.join(TMP, "tree-bin")
+    os.makedirs(fake_bin)
+    tree = os.path.join(TMP, "tree.py")
+    with open(tree, "w") as f:
+        f.write(TREE)
+    log = os.path.join(TMP, "tree.log")
+    with open(os.path.join(fake_bin, "flatpak"), "w") as f:
+        f.write("#!/bin/sh\nexec %s %s flatpak %s\n" % (sys.executable, tree, log))
+    os.chmod(os.path.join(fake_bin, "flatpak"), 0o755)
+    env = {"PATH": fake_bin + ":/usr/bin:/bin", "HOME": HOME}
+
+    def lines():
+        try:
+            with open(log) as f:
+                return [json.loads(line) for line in f]
+        except OSError:
+            return []
+
+    def start():
+        for gone in (log, log + ".quit"):
+            if os.path.exists(gone):
+                os.remove(gone)
+        launcher = subprocess.Popen([main.LAUNCHER, "9"], env=env, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL)
+        until = time.monotonic() + 10
+        while not any(l[0] == "emulator" for l in lines()):
+            if time.monotonic() > until or launcher.poll() is not None:
+                raise AssertionError("the emulator never started")
+            time.sleep(0.05)
+        return launcher
+
+    try:
+        # The game ends by itself: the launcher was there all along and ends with flatpak's code.
+        launcher = start()
+        time.sleep(0.5)
+        check("launcher alive while the game runs", launcher.poll(), None)
+        with open("/proc/%d/cmdline" % launcher.pid, "rb") as f:
+            check("its command line names the launcher", main.LAUNCHER.encode() in f.read(), True)
+        open(log + ".quit", "w").close()
+        check("ends with the game's code", launcher.wait(10), 5)
+        check("nothing signalled", [l for l in lines() if l[2] == "signal"], [])
+
+        for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            launcher = start()
+            launcher.send_signal(number)
+            time.sleep(0.1)
+            launcher.send_signal(number)  # sent again: the emulator still hears it once
+            check("stopped by %d: ends cleanly" % number, launcher.wait(10), 0)
+            seen = lines()
+            check("stopped by %d: the emulator asked once, with SIGTERM" % number,
+                  [l[3] for l in seen if l[0] == "emulator" and l[2] == "signal"], [signal.SIGTERM])
+            check("stopped by %d: the script above finished its own work" % number,
+                  [l[3] for l in seen if l[0] == "wrapper" and l[2] == "after"], [0])
+            check("stopped by %d: every process ended" % number,
+                  sorted(l[0] for l in seen if l[2] == "after"), ["flatpak", "sandbox", "wrapper"])
+    finally:
+        with open(main.LAUNCH_FILE, "w") as f:
+            f.write(kept)
+        os.remove(game)
 
 
 def test_download():
@@ -3070,6 +3173,7 @@ try:
     test_steamgriddb()
     test_sgdb_shared()
     test_launcher()
+    test_launcher_stop()
     test_download()
     test_archive()
     test_saves()

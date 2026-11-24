@@ -58,7 +58,8 @@ It does nothing without Vistazo installed.
   The save is also checked right as a game starts, before the emulator opens it: a newer one played on another device
   is brought first (the start waits a few seconds for it). When RomM cannot be asked, or both changed, the game starts
   as it is and a notice warns not to save over it. A save RomM did not take when the game closed is sent again later,
-  and when Steam next starts.
+  and when Steam next starts. A game stopped from outside (a stream ended with Punktfunk set to close the game, for
+  instance) closes the emulator the way its own Stop would, so the save is written and sent too.
 - **Pictures.** Each entry gets its cover from RomM and, when RomM keeps them, ScreenScraper's logo and fanart
   (in RomM's `config.yml`, add `fanart` and `logo` to `scan.media`, then rescan with "update").
   The logo and wide picture RomM lacks are copied from Tender's entry of the same game while Tender is installed.

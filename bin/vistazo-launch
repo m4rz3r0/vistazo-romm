@@ -3,9 +3,15 @@
 # RomM. Where its file is comes from a private list Vistazo's backend keeps beside this launcher,
 # and the file goes to RetroDECK as one argument of its own: no file name ever reaches a shell or
 # Steam's launch options.
+#
+# It stays alive while the game runs, so that whoever stops the game by signalling this launcher
+# (Punktfunk, when a stream ends) reaches the emulator too: Steam starts it apart from the game's
+# own processes, and a signal sent here is passed on to it (see forward).
 import json
 import os
+import signal
 import stat
+import subprocess
 import sys
 
 RETRODECK = "net.retrodeck.retrodeck"
@@ -73,6 +79,54 @@ def save_in_step(here, rom_id):
         pass
 
 
+def leaves(root):
+    """The processes under root (root itself if it has none yet) that have no children of their
+    own, as (pid, its start time) so that a number reused later is never taken for them."""
+    children = {}
+    started = {}
+    try:
+        names = os.listdir("/proc")
+    except OSError:
+        return []
+    for name in names:
+        if not name.isdigit():
+            continue
+        try:
+            with open("/proc/%s/stat" % name, "rb") as f:
+                fields = f.read().rsplit(b")", 1)[1].split()
+        except (OSError, IndexError):
+            continue  # gone meanwhile
+        pid = int(name)
+        children.setdefault(int(fields[1]), []).append(pid)
+        started[pid] = fields[19]
+    found = []
+    todo = [root]
+    while todo:
+        pid = todo.pop()
+        below = children.get(pid, [])
+        if below:
+            todo.extend(below)
+        elif pid in started:
+            found.append((pid, started[pid]))
+    return found
+
+
+def forward(root, sent):
+    """Asks the emulator under root to stop the way closing it would: SIGTERM, which Dolphin and
+    the others take as "stop", saving as they close. Only the processes at the bottom of the tree
+    get it, the emulator: the scripts and the sandbox above it end once it has, and stopping them
+    first could take the emulator down before it saved. Each process gets it once: a second one
+    makes Dolphin quit at once. Nothing is killed outright; that is for whoever sent the signal."""
+    for leaf in leaves(root):
+        if leaf in sent:
+            continue
+        sent.add(leaf)
+        try:
+            os.kill(leaf[0], signal.SIGTERM)
+        except OSError:
+            pass
+
+
 def main(argv):
     if len(argv) != 2:
         return fail("expected one game number")
@@ -82,10 +136,35 @@ def main(argv):
         return fail(why)
     path, emulator = found
     save_in_step(here, argv[1])
+
+    stopping = []  # the stop signals received, in order
+
+    def on_signal(number, frame):
+        stopping.append(number)
+
+    for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        if signal.getsignal(number) != signal.SIG_IGN:  # one ignored stays so, for the emulator too
+            signal.signal(number, on_signal)
+    if stopping:  # asked to stop while the save was being put in step: the game is not started
+        return 128 + stopping[0]
     try:
-        os.execvp("flatpak", ["flatpak", "run", RETRODECK] + (["-e", emulator] if emulator else []) + [path])
+        # Every descriptor Steam left open is passed on, as when this launcher was replaced by it.
+        child = subprocess.Popen(["flatpak", "run", RETRODECK] + (["-e", emulator] if emulator else []) + [path],
+                                 close_fds=False)
     except OSError as e:
         return fail("flatpak did not start: %s" % e)
+    sent = set()
+    handled = 0
+    while True:
+        try:
+            code = child.wait(timeout=0.2)
+            break
+        except subprocess.TimeoutExpired:
+            pass
+        if len(stopping) > handled:
+            handled = len(stopping)
+            forward(child.pid, sent)
+    return code if code >= 0 else 128 - code
 
 
 if __name__ == "__main__":
