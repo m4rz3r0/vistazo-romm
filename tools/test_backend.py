@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -30,6 +31,7 @@ os.makedirs(os.path.join(HOME, ".config", "romm-tender"))
 os.makedirs(os.path.join(ROMS, "nds"))
 os.makedirs(os.path.join(PLUGIN, "bin"))
 shutil.copy(os.path.join(REPO, "bin", "vistazo-launch"), os.path.join(PLUGIN, "bin", "vistazo-launch"))
+shutil.copy(os.path.join(REPO, "bin", "vistazo-play"), os.path.join(PLUGIN, "bin", "vistazo-play"))
 
 decky = types.ModuleType("decky")
 decky.DECKY_PLUGIN_DIR = PLUGIN
@@ -3163,6 +3165,130 @@ def test_input():
             os.remove(main.LAYOUTS_FILE)
 
 
+def test_punktfunk():
+    """What Punktfunk's plugin reads and asks: the catalog, a download from the TV, its progress,
+    the entry Steam has to make first, and the program that starts such a game through Steam."""
+    pf_home = os.path.join(HOME, ".config", "punktfunk")
+    os.makedirs(pf_home)
+    told = []
+
+    async def emit(*args):
+        told.append(args)
+
+    decky.emit = emit
+    # Two versions of one game (RomM's siblings) and a game with no entry in Steam yet.
+    romm.roms[90] = rom(90, "Tele.nds", sibling_roms=[{"id": 92}])
+    romm.roms[92] = rom(92, "Tele (Es).nds", sibling_roms=[{"id": 90}])
+    romm.roms[91] = rom(91, "Nueva.nds")
+    romm.content[92] = DATA
+    server = None
+
+    def ask(**what):
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(10)
+            s.connect(main.PF_SOCKET)
+            s.sendall((json.dumps(what) + "\n").encode())
+            return json.loads(s.makefile("rb").readline())
+
+    def row(key):
+        return next((r for r in ask(ask="downloads")["rows"] if r["key"] == key), None)
+
+    def until(key, states, timeout=10):
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            got = row(key)
+            if got and got["state"] in states:
+                return got
+            time.sleep(0.05)
+        raise AssertionError("no %s row for %d" % (states, key))
+
+    try:
+        check("taken in its Spanish version", run(plugin.game_take(9000, 92))["ok"], True)
+        os.makedirs(main.PF_DIR, mode=0o700, exist_ok=True)
+        server = run(asyncio.start_unix_server(plugin._pf_asked, path=main.PF_SOCKET))
+        main._pf.update(groups=None, read=0.0, written=None)
+        main._pf["adding"].clear()
+        catalog = {g["key"]: g for g in main._pf_refresh()}
+        check("a game by its lowest version", (catalog[90]["appid"], catalog[90]["rom_id"], catalog[90]["installed"]),
+              (9000, 92, False))
+        check("its versions", catalog[90]["versions"], [90, 92])
+        check("a game without an entry", (catalog[91]["appid"], catalog[91]["rom_id"]), (0, 91))
+        check("its cover, from RomM", catalog[91]["cover"] == "" or os.path.isfile(catalog[91]["cover"]), True)
+        with open(main.PF_CATALOG) as f:
+            written = json.load(f)
+        check("catalog for this user only", mode(main.PF_CATALOG), 0o600)
+        check("catalog says the programs", (written["launcher"], written["player"]), (main.LAUNCHER, main.PLAYER))
+        check("catalog keeps the library", {90, 91} <= {g["key"] for g in written["library"]}, True)
+        main._pf["groups"] = None
+        check("the numbers stay while RomM sleeps", main._pf_groups_kept(), written["library"])
+        main._pf["groups"] = main._pf_groups_kept()
+
+        # Chosen on the TV: the entry's file comes, and the download is told until it is done.
+        check("install asked", ask(ask="install", key=90), {"ok": True, "installed": False})
+        done = until(90, ("done",))
+        check("done, every byte", (done["done"], done["total"]), (len(DATA), len(DATA)))
+        check("on disk", os.path.isfile(os.path.join(ROMS, "nds", "Tele (Es).nds")), True)
+        check("the catalog says installed", {g["key"]: g for g in main._pf_refresh()}[90]["installed"], True)
+        check("asked again: already there", ask(ask="install", key=90), {"ok": True, "installed": True})
+        check("its Steam entry", ask(ask="appid", key=90), {"ok": True, "appid": 9000})
+
+        # The program Punktfunk runs for a game whose entry is new hands Steam the entry's link.
+        main._install_launcher()
+        check("player installed", mode(main.PLAYER), 0o700)
+        fake_bin = os.path.join(TMP, "steam-bin")
+        os.makedirs(fake_bin)
+        steam_log = os.path.join(TMP, "steam.log")
+        with open(os.path.join(fake_bin, "steam"), "w") as f:
+            f.write("#!/bin/sh\necho \"$@\" > %s\n" % steam_log)
+        os.chmod(os.path.join(fake_bin, "steam"), 0o755)
+        env = {"PATH": fake_bin + ":/usr/bin:/bin", "HOME": HOME}
+        started = subprocess.run([main.PLAYER, "90"], env=env, timeout=20)
+        with open(steam_log) as f:
+            check("Steam handed the entry's link", (started.returncode, f.read().strip()),
+                  (0, "steam://rungameid/%d" % ((9000 << 32) | 0x02000000)))
+        check("only a number goes through", subprocess.run([main.PLAYER, "9;id"], env=env, timeout=20,
+                                                           stderr=subprocess.DEVNULL).returncode, 2)
+
+        # Taken away from the TV: only the files the add-on brought.
+        check("uninstall", ask(ask="uninstall", key=90), {"ok": True})
+        check("gone from disk", os.path.isfile(os.path.join(ROMS, "nds", "Tele (Es).nds")), False)
+        check("the catalog says missing", {g["key"]: g for g in main._pf_refresh()}[90]["installed"], False)
+
+        # A download that fails is told in words the player reads.
+        main._jobs[9000] = {"state": "space", "done": 0, "total": len(DATA), "cancel": threading.Event()}
+        check("failed, with why", (row(90)["state"], row(90)["error"]), ("failed", main.PF_WHY["space"]))
+        main._jobs.pop(9000)
+
+        # A game without an entry: the frontend is asked to make it, and the TV sees it waiting.
+        check("install without an entry", ask(ask="install", key=91), {"ok": True})
+        check("the frontend is asked", told[-1], ("vistazo_romm_add", 91, [91], "Game 91"))
+        waiting = row(91)
+        check("waits for Steam", (waiting["state"], waiting["phase"]), ("queued", "Creando la entrada en Steam"))
+        check("asked twice, asked once", (ask(ask="install", key=91), len(told)), ({"ok": True}, 1))
+        run(plugin.punktfunk_added(91, "steam"))
+        check("Steam could not make it", (row(91)["state"], row(91)["error"]), ("failed", main.PF_WHY["steam"]))
+        check("cancelled", ask(ask="cancel", key=91), {"ok": True})
+        check("nothing left of it", row(91), None)
+        main._pf["adding"][91] = {"since": time.monotonic() - main.PF_ADD_WAIT - 1, "why": "", "size": 1}
+        check("Steam too late", row(91)["error"], main.PF_WHY["late"])
+        main._pf["adding"].clear()
+
+        # Nothing that is not a game of the add-on's.
+        check("unknown game", ask(ask="install", key=4242)["ok"], False)
+        check("unknown question", ask(ask="rm -rf", key=90)["ok"], False)
+        check("no entry, no appid", ask(ask="appid", key=91), {"ok": False, "appid": 0})
+    finally:
+        if server is not None:
+            loop.call_soon_threadsafe(server.close)
+        del decky.emit
+        run(plugin.game_release(9000))
+        main._jobs.pop(9000, None)
+        for n in (90, 91, 92):
+            romm.roms.pop(n, None)
+        shutil.rmtree(pf_home, ignore_errors=True)
+        shutil.rmtree(main.PF_DIR, ignore_errors=True)
+
+
 try:
     test_server()
     test_move_in()
@@ -3191,6 +3317,7 @@ try:
     test_device()
     test_input()
     test_start_save()
+    test_punktfunk()
     print("ok: %d checks" % checks)
 finally:
     server.shutdown()

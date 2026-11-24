@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { Addon, AddonAction, AddonFile, AddonGame, AddonProgress, CONTRACT, VistazoApi } from "./contract";
 import { t } from "./i18n";
 import {
+  addAsked,
   BIOS_EVENT,
   biosFetch,
   biosState,
@@ -131,6 +132,15 @@ function watchStarts(): () => void {
   };
   safe(() => addEventListener<[number, string]>("vistazo_romm_start_save", heard), undefined);
   return () => safe(() => removeEventListener("vistazo_romm_start_save", heard), undefined);
+}
+
+// A game chosen on the TV through Punktfunk that has no Steam entry yet: made now, and its file brought.
+function watchAsked(): () => void {
+  const heard = (key: number, versions: number[], name: string) => {
+    void addAsked(Number(key), Array.isArray(versions) ? versions.map(Number) : [], String(name ?? ""));
+  };
+  safe(() => addEventListener<[number, number[], string]>("vistazo_romm_add", heard), undefined);
+  return () => safe(() => removeEventListener("vistazo_romm_add", heard), undefined);
 }
 
 // When Steam starts: any save that never got to RomM (it was not answering when the game closed,
@@ -339,6 +349,7 @@ export default definePlugin(() => {
   const untuck = tuckAway("Vistazo RomM", "vistazo-romm");
   const stopSaves = watchSaves();
   const stopStarts = watchStarts();
+  const stopAsked = watchAsked();
   // Once the list of its games is read and RomM has had a moment to answer.
   setTimeout(() => void catchUpSaves().catch(() => undefined), 20_000);
   return {
@@ -351,6 +362,7 @@ export default definePlugin(() => {
       untuck();
       stopSaves();
       stopStarts();
+      stopAsked();
     },
   };
 });

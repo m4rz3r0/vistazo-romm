@@ -396,6 +396,32 @@ export async function addOwn(romId: number, name: string, from = 0, fetchFile = 
   return null;
 }
 
+// A game chosen on the TV through Punktfunk that has no entry yet: the add-on makes its entry
+// (in the version the settings' language picks) and brings its file at once. The backend shows the
+// download on the TV; when no entry can be made, it is told why.
+const pfAdded = callable<[key: number, why: string], Reply>("punktfunk_added");
+export async function addAsked(key: number, versions: number[], name: string): Promise<void> {
+  let why: string | null = null;
+  try {
+    await loadOwned();
+    const have = ownedAny(versions);
+    if (have) {
+      await download(have);
+      return;
+    }
+    const lib = await library(preferredLanguage()).catch(() => null);
+    const game = lib?.ok ? lib.games.find((g) => versionsOf(g).some((v) => versions.includes(v))) : undefined;
+    const romId = game?.rom_id ?? key;
+    why = await addOwn(romId, game?.name ?? name, 0, true);
+    const appid = ownedApp(romId);
+    if (!why && appid && game?.platform) await putIn(COLLECTION + game.platform, [appid]).catch(() => undefined);
+  } catch (e) {
+    console.warn("[Vistazo RomM] entry asked from Punktfunk", e);
+    why = why ?? "steam";
+  }
+  if (why) await pfAdded(key, why).catch(() => null);
+}
+
 // Games of the add-on's whose Steam entry is gone (removed by hand in Steam): what the add-on keeps of
 // them is of no use any more. Clearing them is the player's call, never done unasked.
 export const lostOwn = () => ownedApps().filter((appid) => !safe(() => appStore.GetAppOverviewByAppID(appid), null));

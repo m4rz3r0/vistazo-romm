@@ -1,0 +1,51 @@
+{
+	"name": "punktfunk-plugin-vistazo-romm",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"description": "Punktfunk plugin: RomM's games from Vistazo RomM in the host's library, downloaded from the TV by the Decky add-on.",
+	"license": "MIT",
+	"module": "./dist/index.js",
+	"main": "./dist/index.js",
+	"bin": {
+		"punktfunk-plugin-vistazo-romm": "./dist/cli.js"
+	},
+	"files": [
+		"dist"
+	],
+	"scripts": {
+		"build": "bun build src/index.ts src/cli.ts --target=bun --outdir dist",
+		"test": "bun test",
+		"typecheck": "tsc -p ."
+	},
+	"devDependencies": {
+		"@punktfunk/host": "0.6.0",
+		"@punktfunk/plugin-kit": "0.15.0",
+		"bun-types": "1.3.0",
+		"effect": "4.0.1",
+		"typescript": "5.9.3"
+	},
+	"punktfunk": {
+		"schema": 1,
+		"id": "vistazo-romm",
+		"reads": [
+			"~/homebrew/data/VistazoRomM",
+			"~/.local/share/Steam/userdata"
+		],
+		"writes": [
+			"~/homebrew/data/VistazoRomM/punktfunk"
+		],
+		"exec": {
+			"play": {
+				"exe": "{player}",
+				"args": [
+					"{game}"
+				],
+				"params": {
+					"player": "path",
+					"game": "digits"
+				}
+			}
+		}
+	}
+}

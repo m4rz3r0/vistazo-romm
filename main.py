@@ -435,29 +435,36 @@ def _emulators(system):
     return {}
 
 
-def _install_launcher():
-    """The launcher beside its list, in the plugin's own data folder: the plugin's folder is
-    replaced on every update, and its files may not be runnable."""
+def _install_program(source, target):
+    """One of the add-on's programs in its own data folder: the plugin's folder is replaced on
+    every update, and its files may not be runnable."""
     try:
-        with open(LAUNCHER_SOURCE, "rb") as f:
+        with open(source, "rb") as f:
             wanted = f.read()
         try:
-            with open(LAUNCHER, "rb") as f:
-                same = f.read() == wanted and os.stat(LAUNCHER).st_mode & 0o777 == 0o700
+            with open(target, "rb") as f:
+                same = f.read() == wanted and os.stat(target).st_mode & 0o777 == 0o700
         except OSError:
             same = False
         if not same:
             os.makedirs(RUNTIME, exist_ok=True)
-            tmp = LAUNCHER + ".tmp"
+            tmp = target + ".tmp"
             fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o700)
             with os.fdopen(fd, "wb") as f:
                 f.write(wanted)
             os.chmod(tmp, 0o700)
-            os.replace(tmp, LAUNCHER)
+            os.replace(tmp, target)
         return True
     except OSError as e:
-        decky.logger.error("Launcher not installed: %s", e)
+        decky.logger.error("%s not installed: %s", os.path.basename(target), e)
         return False
+
+
+def _install_launcher():
+    """The launcher beside its list (and, where Punktfunk is, the program it starts games with)."""
+    if _pf_on():
+        _install_program(PLAYER_SOURCE, PLAYER)
+    return _install_program(LAUNCHER_SOURCE, LAUNCHER)
 
 
 def _text(v):
@@ -2858,6 +2865,218 @@ def _entries_by_system():
     return out
 
 
+# ── Punktfunk ─────────────────────────────────────────────────────────────────────────────────
+# Punktfunk (a game-streaming host) shows RomM's games on a TV through a plugin of its own, which
+# lists them from a catalog written here and asks over a socket for a game to be brought and how
+# its download goes. The download is this add-on's own: the same file in RetroDECK's folder, the
+# same Steam entry and launcher, the same saves kept in step. Only where Punktfunk is set up
+# (its folder in ~/.config): on a Deck without it nothing here runs.
+PF_DIR = os.path.join(RUNTIME, "punktfunk")
+PF_SOCKET = os.path.join(PF_DIR, "vistazo.sock")
+PF_CATALOG = os.path.join(PF_DIR, "catalog.json")
+PF_COVERS = os.path.join(PF_DIR, "covers")
+# What Punktfunk runs to start a game whose Steam entry did not exist yet when it was chosen.
+PLAYER = os.path.join(RUNTIME, "vistazo-play")
+PLAYER_SOURCE = os.path.join(decky.DECKY_PLUGIN_DIR, "bin", "vistazo-play")
+PF_LIBRARY_EVERY = 600  # seconds between two readings of RomM's library for the catalog
+PF_LOOK_EVERY = 3  # seconds between two looks at whether the catalog changed
+PF_ADD_WAIT = 60  # seconds Steam has to make the entry of a game asked for from the TV
+PF_COVERS_AT_ONCE = 8  # covers of games without an entry fetched in one round
+_pf = {"groups": None, "read": 0.0, "adding": {}, "written": None, "server": None, "task": None}
+# How a download of the add-on's reads on Punktfunk's screens: its words for what went wrong.
+PF_WHY = {
+    "unlinked": "Vistazo RomM no está conectado con RomM.",
+    "moved": "La dirección de RomM cambió: conecta Vistazo RomM otra vez.",
+    "limited": "La llave de Vistazo RomM no permite descargar juegos.",
+    "refused": "RomM no dejó descargarlo: conecta Vistazo RomM otra vez.",
+    "unreachable": "RomM no contesta. Elígelo de nuevo para seguir donde se quedó.",
+    "space": "No hay sitio en el disco para este juego.",
+    "disk": "No se pudo escribir en el disco.",
+    "damaged": "El archivo llegó dañado: no coincide con el de RomM.",
+    "game": "RomM ya no tiene este juego.",
+    "system": "Vistazo RomM todavía no sabe en qué carpeta de RetroDECK va esta consola.",
+    "retrodeck": "No se encontró la carpeta de juegos de RetroDECK.",
+    "exists": "Ya hay otro archivo con ese nombre en la carpeta de la consola.",
+    "archive": "El archivo de RomM no se pudo descomprimir.",
+    "steam": "Steam no pudo crear la entrada del juego.",
+    "late": "Steam no creó la entrada del juego a tiempo. ¿Está abierto?",
+    "busy": "El juego se está descargando: páralo antes.",
+    "not-ours": "Ese archivo no lo trajo Vistazo RomM, así que no lo borra.",
+}
+
+
+def _pf_on():
+    return os.path.isdir(os.path.join(_home(), ".config", "punktfunk"))
+
+
+def _pf_say(why):
+    return PF_WHY.get(_text(why), "La descarga falló.")
+
+
+def _pf_groups_kept():
+    """The games and their versions as the catalog last listed them, so a game keeps its number
+    on Punktfunk while RomM is asleep: [{"key", "versions", "rom_id", "name", "platform",
+    "system", "size"}]."""
+    try:
+        with open(PF_CATALOG, encoding="utf-8") as f:
+            listed = json.load(f).get("library")
+        return [g for g in listed if isinstance(g, dict) and _number(g.get("key")) > 0] if isinstance(listed, list) else None
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def _pf_groups(every):
+    """RomM's games, one per game whatever its versions, numbered by its lowest version: that
+    number stays when the entry switches versions. The version listed is the main one (the
+    frontend picks by language when it makes the entry)."""
+    out = []
+    for group in _version_groups(every):
+        roms = [every[i] for i in group]
+        pick = next((r for r in roms if _stands_for_its_versions(r)), roms[0])
+        d = _detail(pick)
+        out.append({"key": group[0], "versions": group, "rom_id": d["rom_id"], "name": d["name"][:120],
+                    "platform": d["platform"][:60], "system": d["system"], "size": d["size"]})
+    return out
+
+
+def _pf_catalog(groups):
+    """Every game Punktfunk lists: RomM's (those whose console's folder is known) and the
+    entries of the add-on's, whether or not their file is here."""
+    with _lock:
+        games = _read_games()["games"]
+    entry = {}  # RomM number -> (appid, game)
+    for appid, game in games.items():
+        if isinstance(game, dict) and _number(appid) > 0 and _number(game.get("rom_id")) > 0:
+            entry[_number(game["rom_id"])] = (_number(appid), game)
+    out, taken = [], set()
+
+    def row(key, appid, game, listed):
+        installed = bool(game and game.get("installed") and os.path.isfile(str(game.get("path") or "")))
+        cover = ""
+        if not appid:
+            for kind in ("png", "jpg"):
+                path = os.path.join(PF_COVERS, "%d.%s" % (key, kind))
+                if os.path.isfile(path):
+                    cover = path
+        return {
+            "key": key,
+            "appid": appid,
+            "rom_id": _number(game.get("rom_id")) if game else _number(listed.get("rom_id")),
+            "versions": listed.get("versions") if listed else [_number(game.get("rom_id"))],
+            "name": _text(listed.get("name")) if listed else "",
+            "platform": _text(listed.get("platform")) if listed else "",
+            "system": _text(game.get("system")) if game else _text(listed.get("system")),
+            "size": _number(game.get("size")) if game and installed else _number((listed or game or {}).get("size")),
+            "installed": installed,
+            "cover": cover,
+        }
+
+    for listed in groups or []:
+        versions = [_number(v) for v in listed.get("versions") or [] if _number(v) > 0]
+        mine = next((entry[v] for v in versions if v in entry), None)
+        if mine:
+            taken.add(mine[0])
+            out.append(row(_number(listed["key"]), mine[0], mine[1], listed))
+        elif listed.get("system"):
+            out.append(row(_number(listed["key"]), 0, None, listed))
+    # Entries RomM no longer lists (or before RomM was ever read): still the player's, by their number.
+    for rom_id, (appid, game) in sorted(entry.items()):
+        if appid not in taken:
+            out.append(row(rom_id, appid, game, None))
+    return out
+
+
+def _pf_covers(server, key, catalog):
+    """Covers of the games that have no Steam entry yet (the others have Steam's pictures)."""
+    os.makedirs(PF_COVERS, exist_ok=True)
+    fetched = 0
+    for game in catalog:
+        if game["appid"] or game["cover"] or fetched >= PF_COVERS_AT_ONCE:
+            continue
+        fetched += 1
+        rom, _why = _rom(server, key, game["rom_id"])
+        cover = _cover(server, key, rom) if rom else None
+        if not cover:
+            continue
+        path = os.path.join(PF_COVERS, "%d.%s" % (game["key"], cover[1]))
+        try:
+            with open(path + ".tmp", "wb") as f:
+                f.write(cover[0])
+            os.replace(path + ".tmp", path)
+            game["cover"] = path
+        except OSError:
+            pass
+
+
+def _pf_refresh():
+    """One look: RomM's library when it is due, then the catalog, written only when it changed."""
+    if _pf["groups"] is None:
+        _pf["groups"] = _pf_groups_kept()
+    server, key = _games_key()
+    if server and time.monotonic() - _pf["read"] > PF_LIBRARY_EVERY:
+        _pf["read"] = time.monotonic()
+        every, why = _library(server, key)
+        if every is not None and not why:
+            _pf["groups"] = _pf_groups(every)
+    catalog = _pf_catalog(_pf["groups"])
+    if server:
+        _pf_covers(server, key, catalog)
+    data = {"version": 1, "launcher": LAUNCHER, "player": PLAYER, "games": catalog, "library": _pf["groups"] or []}
+    text = json.dumps(data, sort_keys=True)
+    if text != _pf["written"] and _write_private(PF_CATALOG, data):
+        _pf["written"] = text
+    return catalog
+
+
+def _pf_row(key, job):
+    """One download as Punktfunk reads it."""
+    state = job["state"]
+    row = {"key": key, "done": _number(job.get("done")), "total": _number(job.get("total"))}
+    if state == "queued":
+        row["state"] = "queued"
+    elif state == "downloading":
+        row["state"] = "installing" if job.get("unpacking") else "downloading"
+        if job.get("unpacking"):
+            row["phase"] = "Descomprimiendo"
+    elif state == "installed":
+        row["state"] = "done"
+    elif state in ("paused", "cancelled"):
+        row["state"] = state
+    else:
+        row["state"] = "failed"
+        row["error"] = _pf_say(state)
+    return row
+
+
+def _pf_downloads(catalog):
+    """Every download of the add-on's Punktfunk may show, by the game's number on Punktfunk."""
+    rows = []
+    with _lock:
+        games = _read_games()["games"]
+        for game in catalog:
+            appid = game["appid"]
+            if appid:
+                _pf["adding"].pop(game["key"], None)
+                job = _jobs.get(appid)
+                part = None if job else _kept_part(games.get(str(appid)))
+                if job and not job.get("to"):  # a version being brought is not a download of the game
+                    rows.append(_pf_row(game["key"], job))
+                elif part:  # paused before a restart
+                    rows.append({"key": game["key"], "state": "paused", "done": os.path.getsize(part),
+                                 "total": game["size"]})
+    now = time.monotonic()
+    for key, asked in list(_pf["adding"].items()):
+        why = asked.get("why") or ("late" if now - asked["since"] > PF_ADD_WAIT else "")
+        if why:
+            rows.append({"key": key, "state": "failed", "done": 0, "total": asked["size"], "error": _pf_say(why)})
+            if now - asked["since"] > PF_ADD_WAIT * 2:
+                _pf["adding"].pop(key, None)
+        else:
+            rows.append({"key": key, "state": "queued", "done": 0, "total": asked["size"],
+                         "phase": "Creando la entrada en Steam"})
+    return rows
+
+
 class Plugin:
     async def romm_status(self):
         """"linked" (a key for RomM's address that may look after games), "limited" (the same,
@@ -4121,6 +4340,108 @@ class Plugin:
             except Exception:
                 pass
 
+    # ── Punktfunk ──────────────────────────────────────────────────────────────────────────────
+    async def punktfunk_added(self, key, why=""):
+        """The frontend could not make the Steam entry of a game asked for from the TV: why, which
+        Punktfunk then shows as the download's end."""
+        asked = _pf["adding"].get(_number(key))
+        if asked is not None:
+            asked["why"] = _text(why)[:40] or "steam"
+        return {"ok": True}
+
+    async def _pf_game(self, key):
+        catalog = await asyncio.get_running_loop().run_in_executor(None, _pf_catalog, _pf["groups"])
+        return next((g for g in catalog if g["key"] == key), None)
+
+    async def _pf_install(self, key):
+        """Brings a game Punktfunk asked for: its entry's file, or first its entry, which only the
+        frontend (in Steam) can make. Answers at once; the download is told by `downloads`."""
+        game = await self._pf_game(key)
+        if not game:
+            return {"ok": False, "say": _pf_say("game")}
+        if game["appid"]:
+            out = await self.game_download(game["appid"])
+            if not out.get("ok"):
+                return {"ok": False, "say": _pf_say(out.get("why"))}
+            return {"ok": True, "installed": bool(out.get("installed")) and not _active(_jobs.get(game["appid"]))}
+        server, why = _games_key()
+        if not server:
+            return {"ok": False, "say": _pf_say(why)}
+        if not game["system"]:
+            return {"ok": False, "say": _pf_say("system")}
+        asked = _pf["adding"].get(key)
+        if asked and not asked.get("why") and time.monotonic() - asked["since"] <= PF_ADD_WAIT:
+            return {"ok": True}
+        _pf["adding"][key] = {"since": time.monotonic(), "why": "", "size": game["size"]}
+        try:
+            await decky.emit("vistazo_romm_add", key, game["versions"], game["name"])
+        except Exception as e:
+            decky.logger.warning("Entry for Punktfunk not asked for: %s", e)
+            _pf["adding"].pop(key, None)
+            return {"ok": False, "say": _pf_say("late")}
+        return {"ok": True}
+
+    async def _pf_act(self, verb, key):
+        """Pause, cancel or remove, asked from Punktfunk."""
+        game = await self._pf_game(key)
+        appid = game["appid"] if game else 0
+        if not appid:
+            if verb == "cancel" or key in _pf["adding"]:
+                _pf["adding"].pop(key, None)  # the entry, if Steam makes it after all, waits on its page
+                return {"ok": True}
+            return {"ok": False, "say": _pf_say("game")}
+        if verb == "pause":
+            out = await self.game_pause(appid)
+            if not out.get("ok") and out.get("why") == "busy":
+                return {"ok": False, "say": "Ahora no se puede pausar: se está descomprimiendo."}
+            return {"ok": True}
+        if verb == "cancel":
+            await self.game_cancel(appid)
+            return {"ok": True}
+        out = await self.game_remove(appid)
+        return {"ok": True} if out.get("ok") else {"ok": False, "say": _pf_say(out.get("why"))}
+
+    async def _pf_asked(self, reader, writer):
+        """One question from Punktfunk's plugin over its socket, as a line of JSON: {"ask": "install",
+        "pause", "cancel", "uninstall", "downloads" or "appid", "key": the game's number}."""
+        try:
+            line = await asyncio.wait_for(reader.readline(), 5)
+            ask = json.loads(line.decode("utf-8", "ignore") or "{}")
+            ask = ask if isinstance(ask, dict) else {}
+            verb, key = _text(ask.get("ask")), _number(ask.get("key"))
+            loop = asyncio.get_running_loop()
+            if verb == "downloads":
+                rows = await loop.run_in_executor(None, lambda: _pf_downloads(_pf_catalog(_pf["groups"])))
+                out = {"ok": True, "rows": rows}
+            elif verb == "install":
+                out = await self._pf_install(key)
+            elif verb in ("pause", "cancel", "uninstall"):
+                out = await self._pf_act(verb, key)
+            elif verb == "appid":
+                game = await self._pf_game(key)
+                out = {"ok": bool(game and game["appid"]), "appid": game["appid"] if game else 0}
+            else:
+                out = {"ok": False, "say": "?"}
+            writer.write((json.dumps(out) + "\n").encode("utf-8"))
+            await writer.drain()
+        except Exception as e:
+            decky.logger.warning("Punktfunk not answered: %s", e)
+        finally:
+            try:
+                writer.close()
+            except Exception:
+                pass
+
+    async def _pf_loop(self):
+        """Keeps the catalog Punktfunk reads up to date."""
+        loop = asyncio.get_running_loop()
+        while True:
+            try:
+                await loop.run_in_executor(None, _pf_refresh)
+            except Exception as e:
+                decky.logger.warning("Catalog for Punktfunk not written: %s", e)
+            await asyncio.sleep(PF_LOOK_EVERY)
+
     async def _main(self):
         try:
             os.makedirs(RUNTIME, exist_ok=True)
@@ -4132,6 +4453,19 @@ class Plugin:
             os.chmod(LAUNCH_SOCKET, 0o600)
         except Exception as e:  # without it games start as before, unchecked
             decky.logger.warning("Launch socket not opened: %s", e)
+        if _pf_on():
+            try:
+                os.makedirs(PF_DIR, mode=0o700, exist_ok=True)
+                try:
+                    os.remove(PF_SOCKET)
+                except OSError:
+                    pass
+                _pf["server"] = await asyncio.start_unix_server(self._pf_asked, path=PF_SOCKET)
+                os.chmod(PF_SOCKET, 0o600)
+                _install_program(PLAYER_SOURCE, PLAYER)
+                _pf["task"] = asyncio.get_running_loop().create_task(self._pf_loop())
+            except Exception as e:  # Punktfunk then lists only what Steam has, as before
+                decky.logger.warning("Punktfunk socket not opened: %s", e)
         _move_in()
         with _lock:
             data = _read_games()
@@ -4151,5 +4485,15 @@ class Plugin:
             os.remove(LAUNCH_SOCKET)
         except OSError:
             pass
+        if _pf["task"] is not None:
+            _pf["task"].cancel()
+            _pf["task"] = None
+        if _pf["server"] is not None:
+            _pf["server"].close()
+            _pf["server"] = None
+            try:
+                os.remove(PF_SOCKET)
+            except OSError:
+                pass
         for job in list(_jobs.values()):
             job["cancel"].set()

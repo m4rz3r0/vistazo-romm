@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+"""Starts, through Steam, the Vistazo RomM entry of a game Punktfunk lists by its number there.
+
+Punktfunk runs this for a game that had no Steam entry yet when it was chosen on the TV: the
+add-on made the entry while the game downloaded, so its number in Steam is known only now. It asks
+the add-on over the socket beside it, then hands Steam the entry's link, as Punktfunk does for any
+other entry. Nothing else goes through: the only argument is a number."""
+import json
+import os
+import socket
+import sys
+import time
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+SOCKET = os.path.join(HERE, "punktfunk", "vistazo.sock")
+WAIT = 30  # seconds the entry has to show up (Steam may still be writing it down)
+
+
+def appid(key):
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(10)
+            s.connect(SOCKET)
+            s.sendall((json.dumps({"ask": "appid", "key": key}) + "\n").encode())
+            line = s.makefile("rb").readline()
+        answer = json.loads(line or b"{}")
+        number = answer.get("appid") if isinstance(answer, dict) else 0
+        return number if isinstance(number, int) and 0 < number < 2 ** 32 else 0
+    except (OSError, ValueError):
+        return 0
+
+
+def main():
+    if len(sys.argv) != 2 or not sys.argv[1].isdigit() or len(sys.argv[1]) > 12:
+        print("usage: vistazo-play <number>", file=sys.stderr)
+        return 2
+    key = int(sys.argv[1])
+    deadline = time.monotonic() + WAIT
+    found = appid(key)
+    while not found and time.monotonic() < deadline:
+        time.sleep(1)
+        found = appid(key)
+    if not found:
+        print("vistazo-play: no Steam entry for game %d" % key, file=sys.stderr)
+        return 1
+    # A non-Steam entry's link: its number in the top half, 0x02000000 in the bottom.
+    os.execvp("steam", ["steam", "steam://rungameid/%d" % ((found << 32) | 0x02000000)])
+
+
+if __name__ == "__main__":
+    sys.exit(main())

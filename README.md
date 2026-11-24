@@ -14,6 +14,11 @@ It does nothing without Vistazo installed.
   [Tender](https://github.com/danielcopper/romm-tender), which keeps the entries it made.
 - **Downloads.** One game comes at a time; the others wait their turn. A download can be paused (on the game's page,
   stopping it pauses it) and goes on from where it stopped, even after a restart, still checked against RomM's sum.
+- **Punktfunk.** On a PC that streams with [Punktfunk](https://punktfunk.unom.io), its plugin in `punktfunk/` lists
+  every RomM game in Punktfunk's library, downloaded or not. Choosing one that is not here on the TV downloads it
+  through this add-on (its entry in Steam made first when it had none), with the download shown on the TV, and the
+  game starts once it is in. It is the same download, entry and saves as from the game's page. The plugin also lists
+  Steam's other non-Steam shortcuts, so Punktfunk's Steam plugin is set not to list them (no game shows twice).
 - **Play time.** Each session of a game played from its entry goes to RomM, with the time played (the Deck's sleep
   left out). Sessions wait on the Deck while RomM is asleep and go once it answers. It needs a token that can also
   write Roms user.
