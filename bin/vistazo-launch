@@ -13,10 +13,14 @@ import signal
 import stat
 import subprocess
 import sys
+import time
 
 RETRODECK = "net.retrodeck.retrodeck"
 # How long the save is waited for: a little longer than Vistazo RomM takes at most (LAUNCH_WAIT).
 WAIT = 30
+# How long an emulator asked to stop is given before it is asked again, which makes it stop at
+# once: well inside the 10 seconds Punktfunk waits before killing this launcher.
+INSIST = 5
 
 
 def fail(why):
@@ -97,6 +101,8 @@ def leaves(root):
         except (OSError, IndexError):
             continue  # gone meanwhile
         pid = int(name)
+        if fields[0] == b"Z":
+            continue  # already ended
         children.setdefault(int(fields[1]), []).append(pid)
         started[pid] = fields[19]
     found = []
@@ -115,16 +121,35 @@ def forward(root, sent):
     """Asks the emulator under root to stop the way closing it would: SIGTERM, which Dolphin and
     the others take as "stop", saving as they close. Only the processes at the bottom of the tree
     get it, the emulator: the scripts and the sandbox above it end once it has, and stopping them
-    first could take the emulator down before it saved. Each process gets it once: a second one
-    makes Dolphin quit at once. Nothing is killed outright; that is for whoever sent the signal."""
+    first could take the emulator down before it saved. Each process gets it once here: a second
+    one makes Dolphin quit at once (see insist). Nothing is killed outright; that is for whoever
+    sent the signal."""
     for leaf in leaves(root):
         if leaf in sent:
             continue
-        sent.add(leaf)
+        sent[leaf] = time.monotonic()
         try:
             os.kill(leaf[0], signal.SIGTERM)
         except OSError:
             pass
+
+
+def insist(sent, insisted):
+    """Asks again, once, each process asked to stop INSIST seconds ago that is still there.
+    Dolphin, asked to stop a Wii game, presses the console's power button and waits for the game
+    to shut down, which some games never do; its second signal ends it at once, as RetroArch's
+    does. A save the game finished writing is already in its file by then."""
+    for leaf, when in sent.items():
+        if leaf in insisted or time.monotonic() - when < INSIST:
+            continue
+        insisted.add(leaf)
+        try:
+            with open("/proc/%d/stat" % leaf[0], "rb") as f:
+                fields = f.read().rsplit(b")", 1)[1].split()
+            if fields[0] != b"Z" and fields[19] == leaf[1]:
+                os.kill(leaf[0], signal.SIGTERM)
+        except (OSError, IndexError):
+            pass  # gone
 
 
 def main(argv):
@@ -153,7 +178,8 @@ def main(argv):
                                  close_fds=False)
     except OSError as e:
         return fail("flatpak did not start: %s" % e)
-    sent = set()
+    sent = {}  # process -> when it was asked to stop
+    insisted = set()
     handled = 0
     while True:
         try:
@@ -164,6 +190,7 @@ def main(argv):
         if len(stopping) > handled:
             handled = len(stopping)
             forward(child.pid, sent)
+        insist(sent, insisted)
     return code if code >= 0 else 128 - code
 
 

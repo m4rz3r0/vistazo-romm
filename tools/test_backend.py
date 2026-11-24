@@ -1349,7 +1349,8 @@ def test_launcher():
 # What runs under the launcher on the PC, played by small scripts: flatpak, the sandbox's first
 # process (which, like bwrap's, a SIGTERM from outside does not reach), RetroDECK's shell script
 # (which dies at once on SIGTERM, and has work of its own once the emulator is gone) and the
-# emulator (which, like Dolphin, stops on SIGTERM and quits outright on a second one).
+# emulator (which, like Dolphin, stops on SIGTERM and quits outright on a second one; or, like
+# Dolphin with a Wii game that ignores the power button, does not stop until that second one).
 TREE = r"""import json, os, signal, subprocess, sys, time
 role, log = sys.argv[1], sys.argv[2]
 def note(*what):
@@ -1361,8 +1362,15 @@ if role == "emulator":
     def on(number, frame):
         got.append(number)
         note("signal", number)
+    stubborn = os.path.exists(log + ".stubborn")
     for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(number, on)
+    if stubborn:
+        while not got:
+            time.sleep(0.05)
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)  # Dolphin's handler is reset once used
+        while True:
+            time.sleep(0.05)
     while not got and not os.path.exists(log + ".quit"):
         time.sleep(0.05)
     if not got:
@@ -1405,10 +1413,12 @@ def test_launcher_stop():
         except OSError:
             return []
 
-    def start():
-        for gone in (log, log + ".quit"):
+    def start(stubborn=False):
+        for gone in (log, log + ".quit", log + ".stubborn"):
             if os.path.exists(gone):
                 os.remove(gone)
+        if stubborn:
+            open(log + ".stubborn", "w").close()
         launcher = subprocess.Popen([main.LAUNCHER, "9"], env=env, stdout=subprocess.DEVNULL,
                                     stderr=subprocess.DEVNULL)
         until = time.monotonic() + 10
@@ -1442,6 +1452,21 @@ def test_launcher_stop():
                   [l[3] for l in seen if l[0] == "wrapper" and l[2] == "after"], [0])
             check("stopped by %d: every process ended" % number,
                   sorted(l[0] for l in seen if l[2] == "after"), ["flatpak", "sandbox", "wrapper"])
+
+        # An emulator that does not stop when asked is asked again, once, before Punktfunk's 10
+        # seconds are up; that second signal ends it, and everything above it ends too.
+        launcher = start(stubborn=True)
+        launcher.send_signal(signal.SIGTERM)
+        time.sleep(3)
+        check("not asked again too soon", launcher.poll(), None)
+        began = time.monotonic()
+        launcher.wait(10)
+        check("asked again in time", time.monotonic() - began < 4, True)
+        seen = lines()
+        check("the emulator ended by the second signal",
+              [l[3] for l in seen if l[0] == "wrapper" and l[2] == "after"], [-signal.SIGTERM])
+        check("the script above still finished its own work",
+              sorted(l[0] for l in seen if l[2] == "after"), ["flatpak", "sandbox", "wrapper"])
     finally:
         with open(main.LAUNCH_FILE, "w") as f:
             f.write(kept)
