@@ -192,9 +192,18 @@ def _forget_key():
         pass
 
 
+# When the add-on last asked RomM for something because someone was using it. RomM may be a
+# machine that sleeps when nobody asks (alfred, in the author's house): the catalog for Punktfunk
+# only reads RomM again in the wake of such a call, so it never keeps RomM awake on its own.
+_romm_asked = {"at": None}
+_quiet = threading.local()  # set while the catalog reads RomM: those calls are not someone's use
+
+
 def _prepare(server, method, path, token=None, body=None, accept="application/json", raw=None):
     """The request, its body and the TLS setup for one call to RomM. `raw` is a body already
     made, with its content type: (bytes, type)."""
+    if server["url"] != SGDB_API and not getattr(_quiet, "on", False):
+        _romm_asked["at"] = time.monotonic()
     req = urllib.request.Request(server["url"] + path, method=method)
     req.add_header("Accept", accept)
     req.add_header("User-Agent", "Vistazo")
@@ -2878,7 +2887,7 @@ PF_COVERS = os.path.join(PF_DIR, "covers")
 # What Punktfunk runs to start a game whose Steam entry did not exist yet when it was chosen.
 PLAYER = os.path.join(RUNTIME, "vistazo-play")
 PLAYER_SOURCE = os.path.join(decky.DECKY_PLUGIN_DIR, "bin", "vistazo-play")
-PF_LIBRARY_EVERY = 600  # seconds between two readings of RomM's library for the catalog
+PF_LIBRARY_EVERY = 600  # seconds between two readings of RomM's library, and how long a use counts
 PF_LOOK_EVERY = 3  # seconds between two looks at whether the catalog changed
 PF_ADD_WAIT = 60  # seconds Steam has to make the entry of a game asked for from the TV
 PF_COVERS_AT_ONCE = 8  # covers of games without an entry fetched in one round
@@ -3013,14 +3022,25 @@ def _pf_refresh():
     if _pf["groups"] is None:
         _pf["groups"] = _pf_groups_kept()
     server, key = _games_key()
-    if server and time.monotonic() - _pf["read"] > PF_LIBRARY_EVERY:
-        _pf["read"] = time.monotonic()
-        every, why = _library(server, key)
-        if every is not None and not why:
-            _pf["groups"] = _pf_groups(every)
-    catalog = _pf_catalog(_pf["groups"])
-    if server:
-        _pf_covers(server, key, catalog)
+    now = time.monotonic()
+    # RomM is read once with nothing kept yet, and then only while someone is using it (a call
+    # in the last PF_LIBRARY_EVERY), at most every PF_LIBRARY_EVERY: never to keep it awake.
+    asked = _romm_asked["at"]
+    awake = asked is not None and now - asked < PF_LIBRARY_EVERY
+    due = _pf["groups"] is None and not _pf["read"] or awake and (
+        not _pf["read"] or now - _pf["read"] > PF_LIBRARY_EVERY)
+    _quiet.on = True
+    try:
+        if server and due:
+            _pf["read"] = now
+            every, why = _library(server, key)
+            if every is not None and not why:
+                _pf["groups"] = _pf_groups(every)
+        catalog = _pf_catalog(_pf["groups"])
+        if server and (due or awake):
+            _pf_covers(server, key, catalog)
+    finally:
+        _quiet.on = False
     data = {"version": 1, "launcher": LAUNCHER, "player": PLAYER, "games": catalog, "library": _pf["groups"] or []}
     text = json.dumps(data, sort_keys=True)
     if text != _pf["written"] and _write_private(PF_CATALOG, data):

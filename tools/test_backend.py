@@ -3238,6 +3238,17 @@ def test_punktfunk():
               (9000, 92, False))
         check("its versions", catalog[90]["versions"], [90, 92])
         check("a game without an entry", (catalog[91]["appid"], catalog[91]["rom_id"]), (0, 91))
+        # Nobody using RomM: the catalog never reads it again on its own, so RomM can sleep.
+        main._romm_asked["at"] = None
+        main._pf["read"] = time.monotonic() - main.PF_LIBRARY_EVERY - 1
+        before = len(romm.calls)
+        main._pf_refresh()
+        check("the catalog leaves an idle RomM alone", romm.calls[before:], [])
+        check("its own reading is not someone's use", main._romm_asked["at"], None)
+        # Someone just used RomM: the reading is due again.
+        main._romm_asked["at"] = time.monotonic()
+        main._pf_refresh()
+        check("the catalog reads RomM while in use", any("/api/roms" in c[1] for c in romm.calls[before:]), True)
         check("its cover, from RomM", catalog[91]["cover"] == "" or os.path.isfile(catalog[91]["cover"]), True)
         with open(main.PF_CATALOG) as f:
             written = json.load(f)
