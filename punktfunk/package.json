@@ -1,6 +1,6 @@
 {
 	"name": "punktfunk-plugin-vistazo-romm",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"private": true,
 	"type": "module",
 	"description": "Punktfunk plugin: RomM's games from Vistazo RomM in the host's library, downloaded from the TV by the Decky add-on.",

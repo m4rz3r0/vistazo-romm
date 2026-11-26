@@ -13,6 +13,13 @@ Punktfunk's Steam plugin started them; a game whose entry the add-on makes while
 One entry per game: turn off **Include non-Steam shortcuts** in Punktfunk's Steam plugin. This plugin lists the
 other non-Steam shortcuts instead.
 
+Those other shortcuts are listed as PC. To file one with a console, write its Steam appid and
+the platform in `~/homebrew/data/VistazoRomM/punktfunk/platforms.json`:
+
+```json
+{"3075036610": "Wii"}
+```
+
 ## Building and installing
 
 With bun (the host ships one in `/usr/lib/punktfunk-bun/bun`):
@@ -22,7 +29,7 @@ bun install
 bun test
 bun build src/index.ts src/cli.ts --target=bun --outdir dist
 bun pm pack --destination /tmp/pf-dev
-punktfunk-host plugins add /tmp/pf-dev/punktfunk-plugin-vistazo-romm-0.1.0.tgz --allow-public-registry
+punktfunk-host plugins add /tmp/pf-dev/punktfunk-plugin-vistazo-romm-0.1.1.tgz --allow-public-registry
 ```
 
 Everything is bundled into `dist/`: the package has no dependencies to install on the host.

@@ -41,6 +41,8 @@ const home = () => os.homedir();
 const dataDir = () => path.join(home(), "homebrew/data/VistazoRomM");
 const pfDir = () => path.join(dataDir(), "punktfunk");
 const catalogFile = () => path.join(pfDir(), "catalog.json");
+/** Optional, written by hand: the platform of a Steam shortcut that is not RomM's, by appid. */
+const platformsFile = () => path.join(pfDir(), "platforms.json");
 const socketFile = () => path.join(pfDir(), "vistazo.sock");
 const userdata = () => path.join(home(), ".local/share/Steam/userdata");
 const MAX_CATALOG = 8 * 1024 * 1024;
@@ -100,6 +102,26 @@ export const readCatalog = (file = catalogFile()): Catalog | undefined => {
 	}
 };
 
+/** A platform for some other shortcuts (`{"3075036610": "Wii"}`), so the TV files them with
+ * that console rather than under PC. Missing or unreadable: none. */
+export const readPlatforms = (file = platformsFile()): ReadonlyMap<number, string> => {
+	const out = new Map<number, string>();
+	const text = readTextCapped(file, 64 * 1024);
+	if (!text) return out;
+	try {
+		const data = JSON.parse(text) as unknown;
+		if (!data || typeof data !== "object" || Array.isArray(data)) return out;
+		for (const [k, v] of Object.entries(data)) {
+			const appid = Number(k);
+			const name = str(v).trim().slice(0, 60);
+			if (Number.isSafeInteger(appid) && appid > 0 && appid < 2 ** 32 && name) out.set(appid, name);
+		}
+	} catch {
+		// unreadable: no platforms
+	}
+	return out;
+};
+
 /** Every signed-in Steam account's config folder (shortcuts.vdf and grid/ art). */
 const configDirs = (root = userdata()) =>
 	listDir(root)
@@ -138,6 +160,7 @@ export const entriesFrom = (
 	catalog: Catalog | undefined,
 	shortcuts: ReadonlyMap<number, Shortcut>,
 	dirs: ReadonlyArray<string>,
+	platforms: ReadonlyMap<number, string> = new Map(),
 ): ProviderEntry[] => {
 	const out: ProviderEntry[] = [];
 	const mine = new Set<number>();
@@ -183,7 +206,7 @@ export const entriesFrom = (
 			launch: { kind: "steam_appid", value: shortcutGameId(sc.appid) },
 			...(Object.keys(art).length ? { art } : {}),
 			...(exe ? { detect: { exe } } : {}),
-			platform: "PC",
+			platform: platforms.get(sc.appid) ?? "PC",
 		});
 	}
 	return out;
@@ -366,7 +389,7 @@ export const plugin = defineLibraryPlugin({
 	scan: () =>
 		Effect.sync(() => {
 			const dirs = configDirs();
-			return entriesFrom(readCatalog(), shortcutsIn(dirs), dirs);
+			return entriesFrom(readCatalog(), shortcutsIn(dirs), dirs, readPlatforms());
 		}),
 	watchDirs: () => [pfDir(), ...configDirs()].filter(isDir),
 	debounce: Duration.seconds(1),

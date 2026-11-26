@@ -5,7 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { DownloadRow } from "@punktfunk/plugin-kit";
 import type { Shortcut } from "@punktfunk/plugin-kit/library";
-import { ask, type Catalog, entriesFrom, makeTracker, readCatalog } from "../src/plugin.js";
+import { ask, type Catalog, entriesFrom, makeTracker, readCatalog, readPlatforms } from "../src/plugin.js";
 
 const LAUNCHER = "/home/u/homebrew/data/VistazoRomM/vistazo-launch";
 const PLAYER = "/home/u/homebrew/data/VistazoRomM/vistazo-play";
@@ -85,6 +85,26 @@ test("one entry per game, installed or not, and the other shortcuts as before", 
 test("without a catalog, every shortcut is listed as Steam's plugin did", () => {
 	const shortcuts = new Map([[3456097576, shortcut(3456097576, "Wii Sports")]]);
 	expect(entriesFrom(undefined, shortcuts, []).map((e) => e.external_id)).toEqual(["steam-3456097576"]);
+});
+
+test("another shortcut can be given its console", () => {
+	const shortcuts = new Map([
+		[3075036610, shortcut(3075036610, "Canal Mii", '"/usr/bin/flatpak"')],
+		[2501829966, shortcut(2501829966, "RetroDECK", '"/usr/bin/flatpak"')],
+	]);
+	const entries = entriesFrom(undefined, shortcuts, [], new Map([[3075036610, "Wii"]]));
+	expect(entries.map((e) => [e.title, e.platform])).toEqual([
+		["Canal Mii", "Wii"],
+		["RetroDECK", "PC"],
+	]);
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vr-pf-"));
+	const file = path.join(dir, "platforms.json");
+	expect(readPlatforms(file).size).toBe(0);
+	fs.writeFileSync(file, "[1]");
+	expect(readPlatforms(file).size).toBe(0);
+	fs.writeFileSync(file, JSON.stringify({ "3075036610": " Wii ", x: "PC", "5": "", "99999999999": "PS2" }));
+	expect([...readPlatforms(file)]).toEqual([[3075036610, "Wii"]]);
+	fs.rmSync(dir, { recursive: true });
 });
 
 test("the catalog file, read leniently", () => {
